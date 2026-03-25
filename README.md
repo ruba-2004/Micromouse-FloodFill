@@ -5,6 +5,7 @@
 
 [![C++](https://img.shields.io/badge/Language-C++-00599C.svg?style=flat-square&logo=c%2B%2B)](https://isocpp.org/)
 [![Platform](https://img.shields.io/badge/Platform-ESP32-E7352C.svg?style=flat-square&logo=espressif)](https://www.espressif.com/)
+[![Trello](https://img.shields.io/badge/Project-Trello_Board-0052CC.svg?style=flat-square&logo=trello)](https://trello.com/b/IGvx6oQh/interfacing-techniques)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](#)
 
 *A comprehensive embedded systems project featuring a dynamic Flood-Fill BFS algorithm, 3-layer PID sensor fusion, and real-time telemetry via an asynchronous web server.*
@@ -17,6 +18,16 @@
 This repository contains the hardware documentation and C++ firmware for an autonomous Micromouse. The system is engineered to navigate an unknown 8x8 physical maze, dynamically map its environment using Time-of-Flight (ToF) LiDAR arrays, and calculate the optimal path to the center using the Flood-Fill algorithm. 
 
 A core focus of this architecture is movement precision, achieved through a custom multi-layered PID control loop that fuses data from a 6-axis IMU, wheel odometry, and absolute LiDAR distance tracking.
+
+## 📋 Project Management
+The complete engineering lifecycle of this robot—including hardware procurement, 3D design iterations, algorithm research, and live testing phases—is fully documented and categorized on our public [Trello Board](https://trello.com/b/IGvx6oQh/interfacing-techniques).
+
+## 🎥 Live Demonstration
+Click the image below to watch the micromouse autonomously map and solve the maze:
+
+[![Micromouse Live Run](https://img.youtube.com/vi/6uRz4zcfJzI/hqdefault.jpg)](https://www.youtube.com/watch?v=6uRz4zcfJzI)
+
+---
 
 ## ⚙️ Core Software Architecture
 
@@ -35,9 +46,11 @@ To prevent blocking code and maintain high-frequency sensor polling, the main `l
 ### 4. Real-Time Telemetry Dashboard
 The ESP32 hosts an asynchronous web server (`WebServer server(80)`). This provides a live HTML/JS UI dashboard to stream sensor telemetry, visualize the 8x8 maze array state, and adjust PID weights (`gyroKp`, `encKp`, `wallKp`) without reflashing the firmware.
 
----
+<div align="center">
+  <img width="523" height="684" alt="Live Web Dashboard Interface" src="https://github.com/user-attachments/assets/677a092d-4974-48ec-ace7-aad589d9d9f2" />
+</div>
 
-<img width="523" height="684" alt="image" src="https://github.com/user-attachments/assets/677a092d-4974-48ec-ace7-aad589d9d9f2" />
+---
 
 ## 🛠️ Hardware Specifications
 
@@ -55,7 +68,7 @@ The system utilizes a dual-I2C bus architecture to prevent sensor polling confli
 
 | Component | Pins | Protocol / Assignment |
 | :--- | :--- | :--- |
-| **MPU6050 (IMU)** | 19 (SDA), 18 (SCL) | `Wire` I2C Bus |
+| **MPU6050 (IMU)** | 19 (SDA), 18 (SCL) | `Wire0` I2C Bus |
 | **VL53L0X LiDARs** | 5 (SDA), 17 (SCL) | `Wire1` I2C Bus |
 | **LiDAR XSHUT** | 15 (L), 4 (F), 16 (R) | Digital Out (Dynamic Address Assignment) |
 | **Left Encoder** | 33 (A), 32 (B) | Hardware Interrupts |
