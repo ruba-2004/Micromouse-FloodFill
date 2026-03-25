@@ -1,0 +1,1584 @@
+#include <Wire.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Adafruit_VL53L0X.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+// ============================================================
+// WiFi
+// ============================================================
+const char* ssid     = "MEDOGP";
+const char* password = "medo1234";
+WebServer server(80);
+
+// ============================================================
+// Pins
+// ============================================================
+#define GYRO_SDA    19
+#define GYRO_SCL    18
+#define LIDAR_SDA    5
+#define LIDAR_SCL   17
+#define XSHUT_LEFT  15
+#define XSHUT_FRONT  4
+#define XSHUT_RIGHT 16
+#define ENC_LEFT_A  33
+#define ENC_LEFT_B  32
+#define ENC_RIGHT_A 34
+#define ENC_RIGHT_B 35
+#define IN1 13
+#define IN2 27
+#define IN3 25
+#define IN4 26
+
+// ============================================================
+// Sensor objects
+// ============================================================
+Adafruit_MPU6050 mpu;
+Adafruit_VL53L0X lidarLeft;
+Adafruit_VL53L0X lidarFront;
+Adafruit_VL53L0X lidarRight;
+
+// ============================================================
+// Sensor readings
+// ============================================================
+int   distLeft = 0, distFront = 0, distRight = 0;
+float gyroX = 0, gyroY = 0, gyroZ_raw = 0;
+float accelX = 0, accelY = 0, accelZ = 0;
+float currentYaw  = 0.0f;
+float headingLock = 0.0f;
+unsigned long lastTime = 0;
+
+// ============================================================
+// Config — all tunable from dashboard
+// ============================================================
+int   moveSpeed       = 150;
+int   turnSpeed       = 130;
+
+// Gyro PD
+float gyroKp          = 1.50f;
+float gyroKd          = 0.40f;
+int   gyroMaxCorr     = 25;
+float gyroDeadband    = 1.5f;
+
+// Encoder PD
+float encKp           = 0.15f;
+int   encMaxCorr      = 20;
+
+// LiDAR wall PD
+float wallKp          = 0.20f;
+float wallKd          = 0.45f;
+int   wallDeadband    = 8;
+int   wallMaxCorr     = 15;
+int   wallSensorLimit = 250;
+
+// Fusion weights
+float wGyro           = 0.55f;
+float wEncoder        = 0.25f;
+float wLidar          = 0.20f;
+int   fusedMaxCorr    = 25;
+
+// General
+int   obstacleThreshold  = 80;
+int   rightSensorOffset  = 10;
+float turnStopAngle      = 85.0f;
+float PPR                = 360.0f;
+float wheelDiameterMM    = 32.0f;
+float wheelCircumference = PI * 32.0f;
+float turnBackupMM       = 60.0f;
+float turnForwardMM      = 60.0f;
+int   brakeStrength      = 60;
+int   brakeDurationMs    = 40;
+
+// ============================================================
+// MAZE CONFIG (tunable from dashboard)
+// ============================================================
+int   nodeDistMM      = 200; // center-to-center cell distance (20cm)
+int   afterTurnDist   = 80;  // forward distance after a turn to reach next node
+int   frontStopDist   = 80;  // front lidar -> stop during maze move
+int   wallDetectDist  = 150; // wall present if lidar < this
+int   mazePauseMs     = 200; // pause at each cell for stable readings
+int   mazeTurnBackupMM= 60;  // backup distance before maze turn (mm)
+int   mazeTurnCenterMM= 0;   // backward distance after turn to center on node
+float turn180Angle    = 170.0f; // gyro target for 180 turn
+
+// ============================================================
+// MAZE DATA STRUCTURES (8x8)
+// ============================================================
+#define WALL_N 0x01
+#define WALL_E 0x02
+#define WALL_S 0x04
+#define WALL_W 0x08
+
+// Direction deltas: 0=N, 1=E, 2=S, 3=W
+const int DR[] = {-1, 0, 1, 0};
+const int DC[] = {0, 1, 0, -1};
+
+uint8_t mazeWalls[8][8];   // known walls (bitmask)
+uint8_t mazeFlood[8][8];   // flood fill values
+bool    mazeVisited[8][8];  // visited cells
+uint8_t pathR[256], pathC[256];
+int     pathLen = 0;
+
+int robotRow = 7, robotCol = 0, robotDir = 0; // current position
+int startRow = 7, startCol = 0, startDir = 0; // user-selected start
+
+bool mazeActive = false;
+bool mazeFromReverse = false; // true when last move was a reverse
+int  mazeNextDir = 0;
+int  mazeTurnDir = 0;         // -1=left, 1=right
+float mazePivotAngle = 85.0f;
+int   mazeMoveDist = 200;
+unsigned long mazePauseStart = 0;
+
+// ============================================================
+// State machine
+// ============================================================
+enum State {
+  STOPPED,
+  MOVING_STRAIGHT,
+  MOVING_DISTANCE,
+  MOVING_BACKWARD,
+  MOVING_BACKWARD_DISTANCE,
+  TURN_LEFT_BACKUP,
+  TURN_LEFT_PIVOT,
+  TURN_LEFT_FORWARD,
+  TURN_RIGHT_BACKUP,
+  TURN_RIGHT_PIVOT,
+  TURN_RIGHT_FORWARD,
+  TURNING_ANGLE_LEFT,
+  TURNING_ANGLE_RIGHT,
+  // Maze solving states
+  MAZE_SCAN,
+  MAZE_DECIDE,
+  MAZE_TURN_BACKUP,
+  MAZE_TURN_PIVOT,
+  MAZE_TURN_ADVANCE,
+  MAZE_TURN_CENTER,
+  MAZE_FORWARD,
+  MAZE_REVERSE,
+  MAZE_DONE
+};
+
+State robotState = STOPPED;
+
+float targetDistanceMM = 180.0f;
+float targetAngleDeg   = 90.0f;
+
+// ============================================================
+// Encoders
+// ============================================================
+volatile long leftEncoderTicks  = 0;
+volatile long rightEncoderTicks = 0;
+long encLeftStart  = 0;
+long encRightStart = 0;
+
+// ============================================================
+// PD state
+// ============================================================
+float lastGyroErr  = 0.0f;
+int   lastWallErr  = 0;
+
+// ============================================================
+// Live fusion corrections for display
+// ============================================================
+float live_fc_gyro  = 0;
+float live_fc_enc   = 0;
+float live_fc_lidar = 0;
+float live_fc_fused = 0;
+
+// ============================================================
+// Log buffer
+// ============================================================
+#define LOG_SIZE 30
+String logBuffer[LOG_SIZE];
+int    logIndex = 0;
+void addLog(String msg) {
+  logBuffer[logIndex % LOG_SIZE] = msg;
+  logIndex++;
+}
+
+// ============================================================
+// ISRs
+// ============================================================
+void IRAM_ATTR readLeftEncoder() {
+  if (digitalRead(ENC_LEFT_A) == digitalRead(ENC_LEFT_B)) leftEncoderTicks++;
+  else leftEncoderTicks--;
+}
+void IRAM_ATTR readRightEncoder() {
+  if (digitalRead(ENC_RIGHT_A) == digitalRead(ENC_RIGHT_B)) rightEncoderTicks++;
+  else rightEncoderTicks--;
+}
+
+// ============================================================
+// Motor control
+// ============================================================
+void setMotors(int L, int R) {
+  L = constrain(L, -255, 255);
+  R = constrain(R, -255, 255);
+  if      (L > 0) { analogWrite(IN1, L);   analogWrite(IN2, 0); }
+  else if (L < 0) { analogWrite(IN1, 0);   analogWrite(IN2, -L); }
+  else            { analogWrite(IN1, 0);   analogWrite(IN2, 0); }
+  if      (R > 0) { analogWrite(IN3, R);   analogWrite(IN4, 0); }
+  else if (R < 0) { analogWrite(IN3, 0);   analogWrite(IN4, -R); }
+  else            { analogWrite(IN3, 0);   analogWrite(IN4, 0); }
+}
+
+void stopMotors() {
+  setMotors(-brakeStrength, -brakeStrength);
+  delay(brakeDurationMs);
+  setMotors(0, 0);
+}
+
+// ============================================================
+// Encoder helpers
+// ============================================================
+float encoderAvgDistanceMM() {
+  float dL = (abs((float)leftEncoderTicks)  / PPR) * wheelCircumference;
+  float dR = (abs((float)rightEncoderTicks) / PPR) * wheelCircumference;
+  return (dL + dR) / 2.0f;
+}
+
+void resetEncoders() {
+  leftEncoderTicks  = 0;
+  rightEncoderTicks = 0;
+}
+
+// ============================================================
+// 3-SENSOR FUSION STRAIGHT-LINE CORRECTION
+// ============================================================
+int fusedStraightCorrectionFull() {
+  // Layer 1: Gyro
+  float gyroErr   = currentYaw - headingLock;
+  float gyroDeriv = gyroErr - lastGyroErr;
+  lastGyroErr     = gyroErr;
+  float gyroCorr  = -(gyroKp * gyroErr + gyroKd * gyroDeriv);
+  gyroCorr = constrain(gyroCorr, -(float)gyroMaxCorr, (float)gyroMaxCorr);
+  live_fc_gyro = gyroCorr;
+
+  // Layer 2: Encoder
+  long relLeft  = leftEncoderTicks  - encLeftStart;
+  long relRight = rightEncoderTicks - encRightStart;
+  long encErr   = relLeft - relRight;
+  float encCorr = encKp * (float)encErr;
+  encCorr = constrain(encCorr, -(float)encMaxCorr, (float)encMaxCorr);
+  live_fc_enc = encCorr;
+
+  // Layer 3: LiDAR (Absolute Single-Wall Tracking)
+  float wallCorr = 0.0f;
+  bool hasLeft  = (distLeft  > 0 && distLeft  < wallSensorLimit);
+  bool hasRight = (distRight > 0 && distRight < wallSensorLimit);
+  bool wallsValid = (hasLeft || hasRight); 
+
+  // GEOMETRY CALCULATION:
+  // Node is 200mm wide. Robot is 100mm wide. 
+  // (200 - 100) / 2 = 50mm distance to each wall.
+  // Adjust this slightly if your sensors are mounted further inside the chassis.
+  float idealWallDist = 50.0f; 
+  int wallErr = 0;
+
+  if (hasLeft && hasRight) {
+    // Both walls: normal centering
+    wallErr = distRight - distLeft;
+  } else if (hasLeft && !hasRight) {
+    // Left wall only: push towards/away from left wall to maintain ideal distance
+    // Multiplied by 2 to match the error magnitude of the two-wall state
+    wallErr = (idealWallDist - distLeft) * 2; 
+  } else if (!hasLeft && hasRight) {
+    // Right wall only
+    wallErr = (distRight - idealWallDist) * 2;
+  }
+
+  if (wallsValid) {
+    if (abs(wallErr) > wallDeadband) {
+      int wallDeriv = wallErr - lastWallErr;
+      wallCorr = wallKp * wallErr + wallKd * (float)wallDeriv;
+      wallCorr = constrain(wallCorr, -(float)wallMaxCorr, (float)wallMaxCorr);
+    }
+    lastWallErr = wallErr;
+  } else {
+    lastWallErr = 0;
+  }
+  live_fc_lidar = wallCorr;
+
+  // Weights
+  float wG = wGyro, wE = wEncoder, wL = wLidar;
+  if (!wallsValid) {
+    float r = wLidar;
+    wG = wGyro    + r * (wGyro    / (wGyro + wEncoder));
+    wE = wEncoder + r * (wEncoder / (wGyro + wEncoder));
+    wL = 0.0f;
+  }
+
+  float fused = (wG * gyroCorr) + (wE * encCorr) + (wL * wallCorr);
+  fused = constrain(fused, -(float)fusedMaxCorr, (float)fusedMaxCorr);
+  live_fc_fused = fused;
+  return (int)fused;
+}
+
+void driveFused(int spd) {
+  int corr = fusedStraightCorrectionFull();
+  setMotors(constrain(spd - corr, spd - fusedMaxCorr, spd + fusedMaxCorr),
+            constrain(spd + corr, spd - fusedMaxCorr, spd + fusedMaxCorr));
+}
+
+void driveBackwardFused(int spd) {
+  int corr = fusedStraightCorrectionFull();
+  setMotors(constrain(-spd - corr, -(spd + fusedMaxCorr), -(spd - fusedMaxCorr)),
+            constrain(-spd + corr, -(spd + fusedMaxCorr), -(spd - fusedMaxCorr)));
+}
+
+void lockHeading() {
+  headingLock   = currentYaw;
+  lastGyroErr   = 0.0f;
+  lastWallErr   = 0;
+  encLeftStart  = leftEncoderTicks;
+  encRightStart = rightEncoderTicks;
+  live_fc_gyro = live_fc_enc = live_fc_lidar = live_fc_fused = 0;
+}
+
+// ============================================================
+// MAZE FUNCTIONS
+// ============================================================
+
+bool isTarget(int r, int c) {
+  return (r == 3 || r == 4) && (c == 3 || c == 4);
+}
+
+void setWallBilateral(int r, int c, int d) {
+  if (r < 0 || r >= 8 || c < 0 || c >= 8) return;
+  mazeWalls[r][c] |= (1 << d);
+  int nr = r + DR[d];
+  int nc = c + DC[d];
+  if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+    mazeWalls[nr][nc] |= (1 << ((d + 2) % 4));
+  }
+}
+
+void initMaze() {
+  memset(mazeWalls, 0, sizeof(mazeWalls));
+  memset(mazeFlood, 255, sizeof(mazeFlood));
+  memset(mazeVisited, 0, sizeof(mazeVisited));
+  pathLen = 0;
+  // Outer boundary walls
+  for (int i = 0; i < 8; i++) {
+    mazeWalls[0][i] |= WALL_N;
+    mazeWalls[7][i] |= WALL_S;
+    mazeWalls[i][0] |= WALL_W;
+    mazeWalls[i][7] |= WALL_E;
+  }
+}
+
+void floodFill() {
+  memset(mazeFlood, 255, sizeof(mazeFlood));
+  // BFS queue
+  uint8_t qr[64], qc[64];
+  int front = 0, back = 0;
+  // Seed: center 4 target cells
+  for (int r = 3; r <= 4; r++) {
+    for (int c = 3; c <= 4; c++) {
+      mazeFlood[r][c] = 0;
+      qr[back] = r; qc[back] = c; back++;
+    }
+  }
+
+  while (front < back) {
+    int r = qr[front];
+    int c = qc[front]; front++;
+    uint8_t nextVal = mazeFlood[r][c] + 1;
+    for (int d = 0; d < 4; d++) {
+      if (mazeWalls[r][c] & (1 << d)) continue;
+      // wall blocks
+      int nr = r + DR[d];
+      int nc = c + DC[d];
+      if (nr < 0 || nr >= 8 || nc < 0 || nc >= 8) continue;
+      if (mazeFlood[nr][nc] > nextVal) {
+        mazeFlood[nr][nc] = nextVal;
+        qr[back] = nr;
+        qc[back] = nc; back++;
+      }
+    }
+  }
+}
+
+void scanMazeWalls() {
+  int frontDir = robotDir;
+  int rightDir = (robotDir + 1) % 4;
+  int leftDir  = (robotDir + 3) % 4;
+  // Take multiple readings for reliability
+  const int NUM_SAMPLES = 5;
+  int frontHits = 0, leftHits = 0, rightHits = 0;
+  for (int s = 0; s < NUM_SAMPLES; s++) {
+    // Read fresh sensor data
+    if (lidarFront.isRangeComplete()) distFront = lidarFront.readRange();
+    if (lidarLeft.isRangeComplete())  distLeft  = lidarLeft.readRange();
+    if (lidarRight.isRangeComplete()) distRight = max(0, lidarRight.readRange() - rightSensorOffset);
+    if (distFront > 0 && distFront < wallDetectDist) frontHits++;
+    if (distLeft  > 0 && distLeft  < wallDetectDist) leftHits++;
+    if (distRight > 0 && distRight < wallDetectDist) rightHits++;
+
+    delay(20);
+    // small delay between samples
+  }
+
+  // Majority vote: only mark wall if 3+ out of 5 samples agree
+  int threshold = (NUM_SAMPLES / 2) + 1; // 3
+
+  if (frontHits >= threshold)
+    setWallBilateral(robotRow, robotCol, frontDir);
+  if (rightHits >= threshold)
+    setWallBilateral(robotRow, robotCol, rightDir);
+  if (leftHits >= threshold)
+    setWallBilateral(robotRow, robotCol, leftDir);
+
+  addLog("MZ walls F:" + String(frontHits) + " L:" + String(leftHits) +
+         " R:" + String(rightHits) + "/" + String(NUM_SAMPLES));
+  mazeVisited[robotRow][robotCol] = true;
+}
+
+void addToPath() {
+  if (pathLen < 256) {
+    pathR[pathLen] = robotRow;
+    pathC[pathLen] = robotCol;
+    pathLen++;
+  }
+}
+
+// Find the best direction to move from current cell (lowest flood value neighbor)
+// Priority on tie: straight > right > left > back
+int findBestDirection() {
+  int bestDir = -1;
+  int bestFlood = 255;
+
+  int checkOrder[4];
+  checkOrder[0] = robotDir;               // straight
+  checkOrder[1] = (robotDir + 1) % 4;     // right
+  checkOrder[2] = (robotDir + 3) % 4;     // left
+  checkOrder[3] = (robotDir + 2) % 4;     // back
+
+  for (int i = 0; i < 4; i++) {
+    int d = checkOrder[i];
+    if (mazeWalls[robotRow][robotCol] & (1 << d)) continue;
+    int nr = robotRow + DR[d];
+    int nc = robotCol + DC[d];
+    if (nr < 0 || nr >= 8 || nc < 0 || nc >= 8) continue;
+    if (mazeFlood[nr][nc] < bestFlood) {
+      bestFlood = mazeFlood[nr][nc];
+      bestDir = d;
+    }
+  }
+  return bestDir;
+}
+
+// ============================================================
+// State name helpers
+// ============================================================
+String stateName() {
+  switch (robotState) {
+    case STOPPED:                  return "STOPPED";
+    case MOVING_STRAIGHT:          return "MOVING_FWD";
+    case MOVING_DISTANCE:          return "MOVE_DIST";
+    case MOVING_BACKWARD:          return "MOVING_BACK";
+    case MOVING_BACKWARD_DISTANCE: return "BACK_DIST";
+    case TURN_LEFT_BACKUP:         return "TL_BACKUP";
+    case TURN_LEFT_PIVOT:          return "TL_PIVOT";
+    case TURN_LEFT_FORWARD:        return "TL_FWD";
+    case TURN_RIGHT_BACKUP:        return "TR_BACKUP";
+    case TURN_RIGHT_PIVOT:         return "TR_PIVOT";
+    case TURN_RIGHT_FORWARD:       return "TR_FWD";
+    case TURNING_ANGLE_LEFT:       return "TURN_L_ANG";
+    case TURNING_ANGLE_RIGHT:      return "TURN_R_ANG";
+    case MAZE_SCAN:                return "MZ_SCAN";
+    case MAZE_DECIDE:              return "MZ_DECIDE";
+    case MAZE_TURN_BACKUP:         return "MZ_T_BACK";
+    case MAZE_TURN_PIVOT:          return "MZ_T_PIVOT";
+    case MAZE_TURN_ADVANCE:        return "MZ_T_FWD";
+    case MAZE_TURN_CENTER:         return "MZ_T_CTR";
+    case MAZE_FORWARD:             return "MZ_FWD";
+    case MAZE_REVERSE:             return "MZ_REV";
+    case MAZE_DONE:                return "MZ_DONE";
+    default:                       return "UNKNOWN";
+  }
+}
+
+String mazeStateName() {
+  if (!mazeActive && robotState != MAZE_DONE) return "IDLE";
+  switch (robotState) {
+    case MAZE_SCAN:          return "SCANNING";
+    case MAZE_DECIDE:        return "DECIDING";
+    case MAZE_TURN_BACKUP:   return "TURNING";
+    case MAZE_TURN_PIVOT:    return "TURNING";
+    case MAZE_TURN_ADVANCE:  return "TURNING";
+    case MAZE_TURN_CENTER:   return "CENTERING";
+    case MAZE_FORWARD:       return "MOVING";
+    case MAZE_REVERSE:       return "REVERSING";
+    case MAZE_DONE:          return "SOLVED";
+    default:                 return mazeActive ? "ACTIVE" : "IDLE";
+  }
+}
+
+// ============================================================
+// HTML page — sent in chunks to save memory
+// ============================================================
+void sendHtmlPage() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+
+  // ---- HEAD + CSS ----
+  String h = "";
+  h += "<!DOCTYPE html><html lang='en'><head>";
+  h += "<meta charset='UTF-8'>";
+  h += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  h += "<title>Micromouse FloodFill</title>";
+  h += "<link href='https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@400;700;900&display=swap' rel='stylesheet'>";
+  h += "<style>";
+  h += ":root{--bg:#0a0c10;--panel:#111520;--border:#1e2a3a;--accent:#00e5ff;--accent2:#ff3d71;--accent3:#a3ff47;--text:#c8d8e8;--dim:#4a6070;--green:#00ff88;--yellow:#ffd740;}";
+  h += "*{box-sizing:border-box;margin:0;padding:0;}";
+  h += "body{background:var(--bg);color:var(--text);font-family:'Exo 2',sans-serif;min-height:100vh;padding:12px;}";
+  h += "h1{font-size:1.4rem;font-weight:900;letter-spacing:.12em;color:var(--accent);text-transform:uppercase;text-align:center;margin-bottom:2px;}";
+  h += ".subtitle{text-align:center;font-family:'Share Tech Mono',monospace;font-size:.65rem;color:var(--dim);letter-spacing:.2em;margin-bottom:14px;}";
+  h += ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px;max-width:1600px;margin:0 auto;}";
+  h += ".card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;position:relative;overflow:hidden;}";
+  h += ".card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);}";
+  h += ".card h2{font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin-bottom:10px;font-family:'Share Tech Mono',monospace;}";
+  h += ".sensor-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}";
+  h += ".sensor-label{font-size:.65rem;color:var(--dim);letter-spacing:.08em;text-transform:uppercase;font-family:'Share Tech Mono',monospace;}";
+  h += ".sensor-val{font-family:'Share Tech Mono',monospace;font-size:.9rem;font-weight:bold;color:var(--accent3);min-width:70px;text-align:right;}";
+  h += ".sensor-val.warn{color:var(--accent2);}.sensor-val.ok{color:var(--green);}";
+  h += "button{padding:10px 6px;border:1px solid var(--border);border-radius:7px;background:#161e2a;color:var(--text);font-family:'Exo 2',sans-serif;font-size:.75rem;font-weight:700;cursor:pointer;text-transform:uppercase;transition:all .15s;}";
+  h += "button:hover{filter:brightness(1.3);}button:active{transform:scale(.96);}";
+  h += ".btn-fwd{border-color:var(--green);color:var(--green);}";
+  h += ".btn-back{border-color:var(--yellow);color:var(--yellow);}";
+  h += ".btn-left{border-color:var(--accent);color:var(--accent);}";
+  h += ".btn-right{border-color:var(--accent);color:var(--accent);}";
+  h += ".btn-stop{border-color:var(--accent2);color:var(--accent2);background:#2a1020;font-size:.85rem;}";
+  h += ".btn-maze{border-color:var(--green);color:#0a0c10;background:var(--green);font-size:.85rem;font-weight:900;}";
+  h += ".btn-maze:hover{background:var(--accent3);}";
+  h += ".btn-maze-rst{border-color:var(--yellow);color:var(--yellow);}";
+  h += ".btn-dist{border-color:#a855f7;color:#a855f7;}";
+  h += ".btn-cfg{border-color:var(--accent3);color:var(--accent3);font-size:.65rem;padding:7px;}";
+  h += ".btn-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;}";
+  h += ".btn-grid-2{grid-template-columns:1fr 1fr;}.btn-grid-1{grid-template-columns:1fr;}";
+  h += ".field-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;gap:6px;}";
+  h += ".field-row label{font-size:.6rem;color:var(--dim);text-transform:uppercase;font-family:'Share Tech Mono',monospace;white-space:nowrap;flex:1;}";
+  h += ".field-row input[type=number],.field-row select{width:80px;background:#0d1218;border:1px solid var(--border);border-radius:5px;color:var(--accent3);font-family:'Share Tech Mono',monospace;font-size:.8rem;padding:4px 6px;text-align:right;}";
+  h += ".field-row select{text-align:left;width:90px;}";
+  h += ".field-row input[type=range]{flex:1;accent-color:var(--accent);}";
+  h += ".range-val{font-family:'Share Tech Mono',monospace;font-size:.75rem;color:var(--accent);min-width:32px;text-align:right;}";
+  h += ".state-badge{display:inline-block;padding:3px 12px;border-radius:20px;font-family:'Share Tech Mono',monospace;font-size:.7rem;text-transform:uppercase;font-weight:bold;background:#161e2a;border:1px solid var(--dim);color:var(--dim);}";
+  h += ".state-badge.active{border-color:var(--green);color:var(--green);}";
+  h += ".state-badge.moving{border-color:var(--accent);color:var(--accent);}";
+  h += ".state-badge.turning{border-color:var(--yellow);color:var(--yellow);}";
+  h += ".state-badge.solved{border-color:var(--accent3);color:var(--accent3);background:#0a1a0a;}";
+  h += ".log-box{background:#080c10;border:1px solid var(--border);border-radius:6px;padding:6px;height:100px;overflow-y:auto;font-family:'Share Tech Mono',monospace;font-size:.6rem;color:#4a8;line-height:1.5;}";
+  h += ".divider{border:none;border-top:1px solid var(--border);margin:10px 0;}";
+  h += ".maze-info{font-family:'Share Tech Mono',monospace;font-size:.7rem;color:var(--dim);margin-bottom:4px;}";
+  h += ".maze-info span{color:var(--accent3);}";
+  h += "canvas{border:1px solid var(--border);border-radius:6px;display:block;margin:0 auto 10px;}";
+  // Fusion bars
+  h += ".fusion-row{display:flex;align-items:center;gap:6px;margin-bottom:6px;}";
+  h += ".fusion-label{font-family:'Share Tech Mono',monospace;font-size:.55rem;color:var(--dim);width:50px;}";
+  h += ".fusion-track{flex:1;background:#080c10;border-radius:4px;height:8px;position:relative;overflow:hidden;}";
+  h += ".fusion-bar{position:absolute;top:0;height:100%;border-radius:4px;transition:all .2s;}";
+  h += ".fusion-center{position:absolute;top:0;left:50%;width:1px;height:100%;background:var(--dim);}";
+  h += ".fusion-val{font-family:'Share Tech Mono',monospace;font-size:.55rem;color:var(--accent3);width:36px;text-align:right;}";
+  h += ".enc-progress-wrap{background:#080c10;border-radius:4px;height:6px;overflow:hidden;margin-top:3px;margin-bottom:8px;}";
+  h += ".enc-progress{height:100%;background:var(--accent);border-radius:4px;transition:width .3s;width:0%;}";
+  h += "</style></head><body>";
+  server.sendContent(h);
+
+  // ---- TITLE ----
+  h = "";
+  h += "<h1>&#9632; Micromouse FloodFill HQ</h1>";
+  h += "<div class='subtitle'>8&#215;8 Maze | FloodFill | 3-Sensor Fusion | Target: Center 4</div>";
+  h += "<div class='grid'>";
+  server.sendContent(h);
+
+  // ---- CARD 1: MAZE VISUALIZATION ----
+  h = "";
+  h += "<div class='card'>";
+  h += "<h2>&#9632; Maze Visualization</h2>";
+  h += "<canvas id='mazeCanvas' width='370' height='370'></canvas>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px'>";
+  h += "<span class='state-badge' id='maze_badge'>IDLE</span>";
+  h += "<div class='maze-info'>Cell: <span id='mz_cell'>7,0</span> Dir: <span id='mz_dir'>N</span> Flood: <span id='mz_flood'>--</span></div>";
+  h += "</div>";
+  h += "<div class='maze-info' style='margin-top:4px'>Steps: <span id='mz_steps'>0</span> | Visited: <span id='mz_visited'>0</span>/64</div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Legend</h2>";
+  h += "<div style='display:flex;flex-wrap:wrap;gap:8px;font-size:.6rem;font-family:Share Tech Mono,monospace'>";
+  h += "<span style='color:#ffd740'>&#9632; Target</span>";
+  h += "<span style='color:#1a3a5a'>&#9632; Visited</span>";
+  h += "<span style='color:#00ff88'>&#9632; Path</span>";
+  h += "<span style='color:#00e5ff'>&#9650; Robot</span>";
+  h += "<span style='color:#fff'>| Walls</span>";
+  h += "</div></div>";
+  server.sendContent(h);
+
+  // ---- CARD 2: MAZE CONTROLS ----
+  h = "";
+  h += "<div class='card'>";
+  h += "<h2>&#9632; Maze Solver Controls</h2>";
+  h += "<div class='btn-grid btn-grid-2' style='margin-bottom:10px'>";
+  h += "<button class='btn-maze' onclick='startMaze()'>&#9654; RUN MAZE</button>";
+  h += "<button class='btn-stop' onclick=\"cmd('STOP')\">&#9724; STOP</button>";
+  h += "</div>";
+  h += "<div class='btn-grid btn-grid-1' style='margin-bottom:10px'>";
+  h += "<button class='btn-maze-rst' onclick='resetMaze()'>&#8635; RESET MAZE</button>";
+  h += "</div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Start Position</h2>";
+  h += "<div class='field-row'><label>Start Row (0-7)</label><input type='number' id='maze_sr' value='7' min='0' max='7'></div>";
+  h += "<div class='field-row'><label>Start Col (0-7)</label><input type='number' id='maze_sc' value='0' min='0' max='7'></div>";
+  h += "<div class='field-row'><label>Start Direction</label><select id='maze_sd'><option value='0'>North</option><option value='1'>East</option><option value='2'>South</option><option value='3'>West</option></select></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Maze Distances</h2>";
+  h += "<div class='field-row'><label>Node Distance (mm)</label><input type='number' id='mz_nd' value='200' min='50' max='400'></div>";
+  h += "<div class='field-row'><label>After Turn (mm)</label><input type='number' id='mz_at' value='80' min='0' max='300'></div>";
+  h += "<div class='field-row'><label>Front Stop (mm)</label><input type='number' id='mz_fst' value='80' min='20' max='200'></div>";
+  h += "<div class='field-row'><label>Wall Detect (mm)</label><input type='number' id='mz_wdt' value='150' min='50' max='300'></div>";
+  h += "<div class='field-row'><label>Scan Pause (ms)</label><input type='number' id='mz_mp' value='200' min='0' max='2000'></div>";
+  h += "<div class='field-row'><label>Turn Backup (mm)</label><input type='number' id='mz_tb' value='60' min='0' max='200'></div>";
+  h += "<div class='field-row'><label>Turn Center (mm)</label><input type='number' id='mz_tc' value='0' min='0' max='200'></div>";
+  h += "<div class='field-row'><label>180&#176; Angle (deg)</label><input type='number' id='mz_180' value='170' min='140' max='200' step='1'></div>";
+  h += "<button class='btn-cfg' style='width:100%;margin-top:4px' onclick='applyMazeCfg()'>Apply Maze Config</button>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Manual Movement</h2>";
+  h += "<div class='field-row'><label>Move Speed</label><input type='range' id='sl_move' min='50' max='255' value='150' oninput=\"document.getElementById('rv_move').innerText=this.value\"><span class='range-val' id='rv_move'>150</span></div>";
+  h += "<div class='field-row'><label>Turn Speed</label><input type='range' id='sl_turn' min='50' max='255' value='130' oninput=\"document.getElementById('rv_turn').innerText=this.value\"><span class='range-val' id='rv_turn'>130</span></div>";
+  h += "<button class='btn-cfg' style='width:100%;margin-bottom:8px' onclick='applySpeed()'>Apply Speeds</button>";
+  h += "<div class='btn-grid' style='margin-bottom:6px'>";
+  h += "<button class='btn-left' onclick=\"cmd('LEFT_90')\">&#8634; Left 90</button>";
+  h += "<button class='btn-fwd' onclick=\"cmd('FORWARD')\">&#9650; Fwd</button>";
+  h += "<button class='btn-right' onclick=\"cmd('RIGHT_90')\">&#8635; Right 90</button>";
+  h += "</div>";
+  h += "<div class='btn-grid'>";
+  h += "<button class='btn-back' onclick=\"cmd('BACKWARD')\">&#9660; Back</button>";
+  h += "<button class='btn-stop' onclick=\"cmd('STOP')\">STOP</button>";
+  h += "<button class='btn-fwd' style='font-size:.6rem' onclick=\"cmd('FORWARD')\">Fwd Cont</button>";
+  h += "</div>";
+  h += "<hr class='divider'>";
+  h += "<div class='field-row'><label>Distance (mm)</label><input type='number' id='inp_dist' value='200' min='1' max='5000'></div>";
+  h += "<div class='btn-grid btn-grid-2' style='margin-bottom:6px'>";
+  h += "<button class='btn-dist' onclick=\"cmdDist('MOVE_DIST')\">Fwd Dist</button>";
+  h += "<button class='btn-dist' style='border-color:#f59e0b;color:#f59e0b' onclick=\"cmdDist('BACK_DIST')\">Back Dist</button>";
+  h += "</div>";
+  h += "<div class='field-row'><label>Angle (deg)</label><input type='number' id='inp_angle' value='90' min='1' max='360'></div>";
+  h += "<div class='btn-grid btn-grid-2'>";
+  h += "<button class='btn-left' onclick=\"cmdAngle('TURN_LEFT')\">Raw L</button>";
+  h += "<button class='btn-right' onclick=\"cmdAngle('TURN_RIGHT')\">Raw R</button>";
+  h += "</div>";
+  h += "</div>";
+  server.sendContent(h);
+
+  // ---- CARD 3: SENSORS ----
+  h = "";
+  h += "<div class='card'>";
+  h += "<h2>&#9632; LiDAR Sensors</h2>";
+  h += "<div style='display:flex;justify-content:space-between;align-items:flex-end;height:50px;margin-bottom:10px;gap:4px'>";
+  h += "<div style='flex:1;display:flex;flex-direction:column;align-items:center;gap:3px'><div style='width:100%;border-radius:3px 3px 0 0;background:var(--yellow);min-height:3px;transition:height .3s' id='bar_left'></div><span style='font-size:.55rem;color:var(--dim);font-family:Share Tech Mono,monospace'>L</span></div>";
+  h += "<div style='flex:1;display:flex;flex-direction:column;align-items:center;gap:3px'><div style='width:100%;border-radius:3px 3px 0 0;background:var(--accent);min-height:3px;transition:height .3s' id='bar_front'></div><span style='font-size:.55rem;color:var(--dim);font-family:Share Tech Mono,monospace'>F</span></div>";
+  h += "<div style='flex:1;display:flex;flex-direction:column;align-items:center;gap:3px'><div style='width:100%;border-radius:3px 3px 0 0;background:var(--accent2);min-height:3px;transition:height .3s' id='bar_right'></div><span style='font-size:.55rem;color:var(--dim);font-family:Share Tech Mono,monospace'>R</span></div>";
+  h += "</div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Left</span><span class='sensor-val' id='s_left'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Front</span><span class='sensor-val' id='s_front'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Right</span><span class='sensor-val' id='s_right'>--</span></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; IMU</h2>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Yaw</span><span class='sensor-val ok' id='s_yaw'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Heading Lock</span><span class='sensor-val' id='s_hlock'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Gyro Z</span><span class='sensor-val' id='s_gz'>--</span></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Odometry</h2>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Enc L</span><span class='sensor-val' id='e_left'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Enc R</span><span class='sensor-val' id='e_right'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Avg Dist</span><span class='sensor-val' id='d_avg'>--</span></div>";
+  h += "<div class='enc-progress-wrap'><div class='enc-progress' id='dist_progress'></div></div>";
+  h += "<button class='btn-cfg' style='width:100%' onclick=\"cmd('RESET_ENC')\">Reset Encoders</button>";
+  h += "</div>";
+  server.sendContent(h);
+
+  // ---- CARD 4: FUSION + STATE ----
+  h = "";
+  h += "<div class='card'>";
+  h += "<h2>&#9632; Fusion Corrections</h2>";
+  h += "<div class='fusion-row'><span class='fusion-label'>GYRO</span><div class='fusion-track'><div class='fusion-center'></div><div class='fusion-bar' id='fb_gyro' style='background:var(--green);width:0%;left:50%'></div></div><span class='fusion-val' id='fv_gyro'>0</span></div>";
+  h += "<div class='fusion-row'><span class='fusion-label'>ENC</span><div class='fusion-track'><div class='fusion-center'></div><div class='fusion-bar' id='fb_enc' style='background:var(--yellow);width:0%;left:50%'></div></div><span class='fusion-val' id='fv_enc'>0</span></div>";
+  h += "<div class='fusion-row'><span class='fusion-label'>LIDAR</span><div class='fusion-track'><div class='fusion-center'></div><div class='fusion-bar' id='fb_lidar' style='background:var(--accent);width:0%;left:50%'></div></div><span class='fusion-val' id='fv_lidar'>0</span></div>";
+  h += "<div class='fusion-row'><span class='fusion-label'>FUSED</span><div class='fusion-track'><div class='fusion-center'></div><div class='fusion-bar' id='fb_fused' style='background:var(--accent2);width:0%;left:50%'></div></div><span class='fusion-val' id='fv_fused'>0</span></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Robot State</h2>";
+  h += "<span class='state-badge' id='state_badge'>STOPPED</span>";
+  h += "<div class='sensor-row' style='margin-top:8px'><span class='sensor-label'>Target Dist</span><span class='sensor-val' id='tgt_dist'>--</span></div>";
+  h += "<div class='sensor-row'><span class='sensor-label'>Target Angle</span><span class='sensor-val' id='tgt_angle'>--</span></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Event Log</h2>";
+  h += "<div class='log-box' id='log_box'>-- ready --</div>";
+  h += "</div>";
+  server.sendContent(h);
+
+  // ---- CARD 5: TUNING CONFIG ----
+  h = "";
+  h += "<div class='card'>";
+  h += "<h2>&#9632; Fusion Weights (sum=1.0)</h2>";
+  h += "<div class='field-row'><label>Gyro W</label><input type='number' id='cfg_wg' value='0.55' step='0.05' min='0' max='1'></div>";
+  h += "<div class='field-row'><label>Encoder W</label><input type='number' id='cfg_we' value='0.25' step='0.05' min='0' max='1'></div>";
+  h += "<div class='field-row'><label>LiDAR W</label><input type='number' id='cfg_wl' value='0.20' step='0.05' min='0' max='1'></div>";
+  h += "<div class='field-row'><label>Fused Max</label><input type='number' id='cfg_fmc' value='25' min='5' max='60'></div>";
+  h += "<button class='btn-cfg' style='width:100%;margin-top:3px' onclick='applyFusionCfg()'>Apply Fusion</button>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Gyro PD</h2>";
+  h += "<div class='field-row'><label>Kp</label><input type='number' id='cfg_gkp' value='1.50' step='0.05'></div>";
+  h += "<div class='field-row'><label>Kd</label><input type='number' id='cfg_gkd' value='0.40' step='0.05'></div>";
+  h += "<div class='field-row'><label>Max Corr</label><input type='number' id='cfg_gmc' value='25'></div>";
+  h += "<div class='field-row'><label>Deadband</label><input type='number' id='cfg_gdb' value='1.5' step='0.1'></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Encoder PD</h2>";
+  h += "<div class='field-row'><label>Kp</label><input type='number' id='cfg_ekp' value='0.15' step='0.01'></div>";
+  h += "<div class='field-row'><label>Max Corr</label><input type='number' id='cfg_emc' value='20'></div>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; Wall PD</h2>";
+  h += "<div class='field-row'><label>Kp</label><input type='number' id='cfg_wkp' value='0.20' step='0.05'></div>";
+  h += "<div class='field-row'><label>Kd</label><input type='number' id='cfg_wkd' value='0.45' step='0.05'></div>";
+  h += "<div class='field-row'><label>Deadband</label><input type='number' id='cfg_wdb' value='8'></div>";
+  h += "<div class='field-row'><label>Max Corr</label><input type='number' id='cfg_wmc' value='15'></div>";
+  h += "<div class='field-row'><label>Sensor Limit</label><input type='number' id='cfg_wsl' value='250'></div>";
+  h += "<button class='btn-cfg' style='width:100%;margin-top:3px' onclick='applyCorrectCfg()'>Apply Corrections</button>";
+  h += "<hr class='divider'>";
+  h += "<h2>&#9632; General</h2>";
+  h += "<div class='field-row'><label>Obstacle (mm)</label><input type='number' id='cfg_obs' value='80'></div>";
+  h += "<div class='field-row'><label>R Sensor Offset</label><input type='number' id='cfg_rso' value='10'></div>";
+  h += "<div class='field-row'><label>Turn 90 Angle</label><input type='number' id='cfg_tsa' value='85' step='0.5'></div>";
+  h += "<div class='field-row'><label>PPR</label><input type='number' id='cfg_ppr' value='360'></div>";
+  h += "<div class='field-row'><label>Wheel Dia (mm)</label><input type='number' id='cfg_wd' value='32' step='0.5'></div>";
+  h += "<div class='field-row'><label>Turn Backup (mm)</label><input type='number' id='cfg_tbk' value='60' step='5'></div>";
+  h += "<div class='field-row'><label>Turn Forward (mm)</label><input type='number' id='cfg_tfwd' value='60' step='5'></div>";
+  h += "<div class='field-row'><label>Brake Strength</label><input type='number' id='cfg_bstr' value='60'></div>";
+  h += "<div class='field-row'><label>Brake Duration</label><input type='number' id='cfg_bdur' value='40'></div>";
+  h += "<button class='btn-cfg' style='width:100%;margin-top:3px' onclick='applyGeneralCfg()'>Apply General</button>";
+  h += "</div>";
+  server.sendContent(h);
+
+  // ---- END GRID ----
+  h = "";
+  h += "</div>";
+  server.sendContent(h);
+
+  // ---- JAVASCRIPT ----
+  h = "";
+  h += "<script>";
+  // Command helpers
+  h += "function cmd(a){fetch('/command?action='+a);}";
+  h += "function cmdDist(a){fetch('/command?action='+a+'&dist='+document.getElementById('inp_dist').value);}";
+  h += "function cmdAngle(a){fetch('/command?action='+a+'&angle='+document.getElementById('inp_angle').value);}";
+
+  // Maze controls
+  h += "function startMaze(){";
+  h += "var sr=document.getElementById('maze_sr').value;";
+  h += "var sc=document.getElementById('maze_sc').value;";
+  h += "var sd=document.getElementById('maze_sd').value;";
+  h += "fetch('/command?action=MAZE_START&sr='+sr+'&sc='+sc+'&sd='+sd);}";
+  h += "function resetMaze(){fetch('/command?action=MAZE_RESET');}";
+
+  // Apply settings
+  h += "function applySpeed(){fetch('/settings?ms='+document.getElementById('sl_move').value+'&ts='+document.getElementById('sl_turn').value);}";
+  h += "function applyFusionCfg(){fetch('/fusioncfg?wg='+document.getElementById('cfg_wg').value+'&we='+document.getElementById('cfg_we').value+'&wl='+document.getElementById('cfg_wl').value+'&fmc='+document.getElementById('cfg_fmc').value);}";
+  h += "function applyCorrectCfg(){fetch('/correctcfg?gkp='+document.getElementById('cfg_gkp').value+'&gkd='+document.getElementById('cfg_gkd').value+'&gmc='+document.getElementById('cfg_gmc').value+'&gdb='+document.getElementById('cfg_gdb').value+'&ekp='+document.getElementById('cfg_ekp').value+'&emc='+document.getElementById('cfg_emc').value+'&wkp='+document.getElementById('cfg_wkp').value+'&wkd='+document.getElementById('cfg_wkd').value+'&wdb='+document.getElementById('cfg_wdb').value+'&wmc='+document.getElementById('cfg_wmc').value+'&wsl='+document.getElementById('cfg_wsl').value);}";
+  h += "function applyGeneralCfg(){fetch('/generalcfg?obs='+document.getElementById('cfg_obs').value+'&rso='+document.getElementById('cfg_rso').value+'&tsa='+document.getElementById('cfg_tsa').value+'&ppr='+document.getElementById('cfg_ppr').value+'&wd='+document.getElementById('cfg_wd').value+'&tbk='+document.getElementById('cfg_tbk').value+'&tfwd='+document.getElementById('cfg_tfwd').value+'&bstr='+document.getElementById('cfg_bstr').value+'&bdur='+document.getElementById('cfg_bdur').value);}";
+  h += "function applyMazeCfg(){fetch('/mazecfg?nd='+document.getElementById('mz_nd').value+'&at='+document.getElementById('mz_at').value+'&fst='+document.getElementById('mz_fst').value+'&wdt='+document.getElementById('mz_wdt').value+'&mp='+document.getElementById('mz_mp').value+'&tb='+document.getElementById('mz_tb').value+'&tc='+document.getElementById('mz_tc').value+'&a180='+document.getElementById('mz_180').value);}";
+  server.sendContent(h);
+
+  // Canvas drawing
+  h = "";
+  h += "var cv=document.getElementById('mazeCanvas'),cx=cv.getContext('2d');";
+  h += "var CS=42,PD=11;"; // cell size, padding
+  h += "var dirNames=['N','E','S','W'];";
+
+  // drawMaze function
+  h += "function drawMaze(d){";
+  h += "cx.fillStyle='#0a0c10';cx.fillRect(0,0,cv.width,cv.height);";
+  h += "var mw=d.mw,mf=d.mf,mv=d.mv;";
+  // Draw cells
+  h += "for(var r=0;r<8;r++){for(var c=0;c<8;c++){";
+  h += "var i=r*8+c,x=PD+c*CS,y=PD+r*CS;";
+  // Background color
+  h += "if((r==3||r==4)&&(c==3||c==4))cx.fillStyle='#2a2510';";
+  h += "else if(mv[i])cx.fillStyle='#0f1f30';";
+  h += "else cx.fillStyle='#0d1218';";
+  h += "cx.fillRect(x+1,y+1,CS-2,CS-2);";
+  // Flood value
+  h += "if(mf[i]<255){cx.fillStyle='#445';cx.font='9px Share Tech Mono,monospace';cx.textAlign='center';cx.textBaseline='middle';cx.fillText(mf[i],x+CS/2,y+CS/2);}";
+  // Target highlight
+  h += "if((r==3||r==4)&&(c==3||c==4)){cx.strokeStyle='#ffd74033';cx.lineWidth=1;cx.strokeRect(x+2,y+2,CS-4,CS-4);}";
+  h += "}}";
+  // Draw walls
+  h += "cx.strokeStyle='#c0c8d0';cx.lineWidth=2;";
+  h += "for(var r=0;r<8;r++){for(var c=0;c<8;c++){";
+  h += "var i=r*8+c,x=PD+c*CS,y=PD+r*CS,w=mw[i];";
+  h += "cx.beginPath();";
+  h += "if(w&1){cx.moveTo(x,y);cx.lineTo(x+CS,y);}";
+  h += "if(w&2){cx.moveTo(x+CS,y);cx.lineTo(x+CS,y+CS);}";
+  h += "if(w&4){cx.moveTo(x,y+CS);cx.lineTo(x+CS,y+CS);}";
+  h += "if(w&8){cx.moveTo(x,y);cx.lineTo(x,y+CS);}";
+  h += "cx.stroke();";
+  h += "}}";
+  // Draw path
+  h += "var p=d.mp;";
+  h += "if(p&&p.length>1){";
+  h += "cx.strokeStyle='#00ff8866';cx.lineWidth=3;cx.lineJoin='round';cx.lineCap='round';cx.beginPath();";
+  h += "cx.moveTo(PD+p[0][1]*CS+CS/2,PD+p[0][0]*CS+CS/2);";
+  h += "for(var i=1;i<p.length;i++){cx.lineTo(PD+p[i][1]*CS+CS/2,PD+p[i][0]*CS+CS/2);}";
+  h += "cx.stroke();}";
+  // Highlight current cell
+  h += "cx.fillStyle='#00e5ff18';cx.fillRect(PD+d.mc*CS+1,PD+d.mr*CS+1,CS-2,CS-2);";
+  // Draw robot (triangle)
+  h += "var rx=PD+d.mc*CS+CS/2,ry=PD+d.mr*CS+CS/2;";
+  h += "cx.save();cx.translate(rx,ry);";
+  h += "cx.rotate([0,Math.PI/2,Math.PI,-Math.PI/2][d.md]);";
+  h += "cx.fillStyle='#00e5ff';cx.beginPath();cx.moveTo(0,-14);cx.lineTo(9,10);cx.lineTo(-9,10);cx.closePath();cx.fill();";
+  h += "cx.restore();";
+  // Row/col labels
+  h += "cx.fillStyle='#335';cx.font='9px Share Tech Mono,monospace';cx.textAlign='center';cx.textBaseline='middle';";
+  h += "for(var i=0;i<8;i++){cx.fillText(i,PD+i*CS+CS/2,PD-5);cx.fillText(i,PD-7,PD+i*CS+CS/2);}";
+  h += "}"; // end drawMaze
+  server.sendContent(h);
+
+  // Fusion bar helper + update badge
+  h = "";
+  h += "function sfb(b,v,val,mx){var e=document.getElementById(b),p=Math.min(50,Math.abs(val)/mx*50);e.style.width=p+'%';e.style.left=val>=0?'50%':(50-p)+'%';document.getElementById(v).innerText=val.toFixed(1);}";
+
+  h += "function updateBadge(s){var b=document.getElementById('state_badge');b.innerText=s;b.className='state-badge';";
+  h += "if(s==='STOPPED')b.classList.add('active');";
+  h += "else if(s.indexOf('T')>=0&&s.indexOf('MZ')>=0)b.classList.add('turning');";
+  h += "else if(s.indexOf('MZ')>=0)b.classList.add('moving');";
+  h += "else if(s.indexOf('TL_')>=0||s.indexOf('TR_')>=0||s.indexOf('TURN')>=0)b.classList.add('turning');";
+  h += "else b.classList.add('moving');}";
+
+  h += "function updateMazeBadge(ms){var b=document.getElementById('maze_badge');b.innerText=ms;b.className='state-badge';";
+  h += "if(ms==='IDLE'){}else if(ms==='SOLVED')b.classList.add('solved');";
+  h += "else if(ms==='TURNING')b.classList.add('turning');";
+  h += "else if(ms==='MOVING')b.classList.add('moving');";
+  h += "else b.classList.add('active');}";
+  server.sendContent(h);
+
+  // Main polling loop
+  h = "";
+  h += "setInterval(function(){";
+  h += "fetch('/data').then(function(r){return r.json();}).then(function(d){";
+  // Sensor display
+  h += "document.getElementById('s_left').innerText=d.left+' mm';";
+  h += "document.getElementById('s_front').innerText=d.front+' mm';";
+  h += "document.getElementById('s_right').innerText=d.right+' mm';";
+  h += "document.getElementById('s_front').className='sensor-val'+(d.front>0&&d.front<120?' warn':'');";
+  h += "var sb=function(id,v){document.getElementById(id).style.height=Math.max(3,Math.min(45,(v/300)*45))+'px';};";
+  h += "sb('bar_front',d.front);sb('bar_left',d.left);sb('bar_right',d.right);";
+  h += "document.getElementById('s_yaw').innerText=d.yaw.toFixed(2)+'°';";
+  h += "document.getElementById('s_hlock').innerText=d.hlock.toFixed(2)+'°';";
+  h += "document.getElementById('s_gz').innerText=d.gz.toFixed(2)+' °/s';";
+  // Fusion bars
+  h += "sfb('fb_gyro','fv_gyro',d.fc_gyro,20);";
+  h += "sfb('fb_enc','fv_enc',d.fc_enc,15);";
+  h += "sfb('fb_lidar','fv_lidar',d.fc_lidar,12);";
+  h += "sfb('fb_fused','fv_fused',d.fc_fused,25);";
+  // Encoders
+  h += "document.getElementById('e_left').innerText=d.enc_left;";
+  h += "document.getElementById('e_right').innerText=d.enc_right;";
+  h += "var ppr=parseFloat(document.getElementById('cfg_ppr').value)||360;";
+  h += "var wd=parseFloat(document.getElementById('cfg_wd').value)||32;";
+  h += "var circ=3.14159*wd;";
+  h += "var dL=((Math.abs(d.enc_left)/ppr)*circ);";
+  h += "var dR=((Math.abs(d.enc_right)/ppr)*circ);";
+  h += "var avg=((dL+dR)/2);";
+  h += "document.getElementById('d_avg').innerText=avg.toFixed(1)+' mm';";
+  h += "document.getElementById('tgt_dist').innerText=d.tgt_dist.toFixed(0)+' mm';";
+  h += "document.getElementById('tgt_angle').innerText=d.tgt_angle.toFixed(1)+'°';";
+  h += "var pct=d.tgt_dist>0?Math.min(100,(avg/d.tgt_dist)*100):0;";
+  h += "document.getElementById('dist_progress').style.width=pct+'%';";
+  // State
+  h += "updateBadge(d.state);";
+  h += "updateMazeBadge(d.ms2);";
+  // Maze info
+  h += "document.getElementById('mz_cell').innerText=d.mr+','+d.mc;";
+  h += "document.getElementById('mz_dir').innerText=dirNames[d.md];";
+  h += "document.getElementById('mz_flood').innerText=d.mf[d.mr*8+d.mc];";
+  h += "document.getElementById('mz_steps').innerText=d.mp?d.mp.length:0;";
+  h += "var vc=0;for(var i=0;i<64;i++)if(d.mv[i])vc++;document.getElementById('mz_visited').innerText=vc;";
+  // Draw maze
+  h += "drawMaze(d);";
+  // Log
+  h += "if(d.log&&d.log.length>0){var box=document.getElementById('log_box');var html='';for(var i=0;i<d.log.length;i++){html+='> '+d.log[i]+'<br>';}box.innerHTML=html;box.scrollTop=box.scrollHeight;}";
+  h += "}).catch(function(){});},300);";
+  h += "</script></body></html>";
+  server.sendContent(h);
+}
+
+// ============================================================
+// Setup
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(ENC_LEFT_A,  INPUT); pinMode(ENC_LEFT_B,  INPUT);
+  pinMode(ENC_RIGHT_A, INPUT); pinMode(ENC_RIGHT_B, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ENC_LEFT_A),  readLeftEncoder,  CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_RIGHT_A), readRightEncoder, CHANGE);
+
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  setMotors(0, 0);
+  pinMode(XSHUT_LEFT,  OUTPUT);
+  pinMode(XSHUT_FRONT, OUTPUT);
+  pinMode(XSHUT_RIGHT, OUTPUT);
+  digitalWrite(XSHUT_LEFT,  LOW);
+  digitalWrite(XSHUT_FRONT, LOW);
+  digitalWrite(XSHUT_RIGHT, LOW);
+  delay(10);
+
+  Wire.begin(GYRO_SDA,  GYRO_SCL);
+  Wire1.begin(LIDAR_SDA, LIDAR_SCL);
+  if (!mpu.begin(0x68, &Wire)) {
+    addLog("ERR: MPU6050");
+  } else {
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    addLog("MPU6050 OK");
+  }
+
+  digitalWrite(XSHUT_LEFT,  HIGH); delay(10);
+  if (!lidarLeft.begin(0x30,  false, &Wire1)) addLog("ERR: LiDAR L"); else addLog("LiDAR L OK");
+  digitalWrite(XSHUT_FRONT, HIGH);
+  delay(10);
+  if (!lidarFront.begin(0x31, false, &Wire1)) addLog("ERR: LiDAR F"); else addLog("LiDAR F OK");
+  digitalWrite(XSHUT_RIGHT, HIGH); delay(10);
+  if (!lidarRight.begin(0x29, false, &Wire1)) addLog("ERR: LiDAR R"); else addLog("LiDAR R OK");
+
+  lidarLeft.startRangeContinuous();
+  lidarFront.startRangeContinuous();
+  lidarRight.startRangeContinuous();
+
+  WiFi.begin(ssid, password);
+  int att = 0;
+  while (WiFi.status() != WL_CONNECTED && att < 20) {
+    delay(500); Serial.print("."); att++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    addLog("WiFi: " + WiFi.localIP().toString());
+    Serial.println("\nIP: " + WiFi.localIP().toString());
+  } else {
+    addLog("WiFi FAILED");
+  }
+
+  // Initialize maze
+  initMaze();
+  floodFill();
+  // ---- HTTP ROUTES ----
+
+  server.on("/", []() { sendHtmlPage(); });
+  // ---- /data — combined sensor + maze JSON ----
+  server.on("/data", []() {
+    // Build wall array
+    String wj = "["; String fj = "["; String vj = "[";
+    for (int i = 0; i < 64; i++) {
+      if (i > 0) { wj += ","; fj += ","; vj += ","; }
+      wj += String(mazeWalls[i/8][i%8]);
+      fj += String(mazeFlood[i/8][i%8]);
+      vj += String(mazeVisited[i/8][i%8] ? 1 : 0);
+    }
+    wj += "]"; fj += "]"; vj += "]";
+
+    // Path array
+    String pj = "[";
+    for (int i = 0; i < pathLen; i++) {
+      if (i > 0) pj += ",";
+      pj += "[" + String(pathR[i]) + "," + String(pathC[i]) + "]";
+    }
+    pj += "]";
+
+    // Log
+    String lj = "[";
+    int count = min(logIndex, LOG_SIZE);
+    
+    int start = (logIndex >= LOG_SIZE) ? (logIndex % LOG_SIZE) : 0;
+    for (int i = 0; i < count; i++) {
+      int idx = (start + i) % LOG_SIZE;
+      lj += "\"" + logBuffer[idx] + "\"";
+      if (i < count - 1) lj += ",";
+    }
+    lj += "]";
+
+    String json =
+      "{\"front\":"     + String(distFront)        +
+      ",\"left\":"      + String(distLeft)          +
+      ",\"right\":"     + String(distRight)         +
+      ",\"yaw\":"       + String(currentYaw)        +
+      ",\"hlock\":"     + String(headingLock)       +
+      ",\"gz\":"        + String(gyroZ_raw)         +
+      ",\"enc_left\":"  + String(leftEncoderTicks)  +
+      ",\"enc_right\":" + String(rightEncoderTicks) +
+      ",\"tgt_dist\":"  + String(targetDistanceMM)  +
+      ",\"tgt_angle\":" + String(targetAngleDeg)    +
+      ",\"fc_gyro\":"   + String(live_fc_gyro)      +
+      ",\"fc_enc\":"    + String(live_fc_enc)       +
+      ",\"fc_lidar\":"  + String(live_fc_lidar)     +
+      ",\"fc_fused\":"  + String(live_fc_fused)     +
+      ",\"state\":\""   + stateName()               + "\""  +
+      ",\"ms2\":\""     + mazeStateName()           + "\""  +
+      ",\"mr\":"        + String(robotRow)          +
+      ",\"mc\":"        + String(robotCol)          +
+      ",\"md\":"        + String(robotDir)          +
+      ",\"ma\":"        + String(mazeActive ? 1 : 0) +
+      ",\"mw\":"        + wj +
+      ",\"mf\":"        + fj +
+      ",\"mv\":"        + vj +
+      ",\"mp\":"        + pj +
+      ",\"log\":"       + lj + "}";
+    server.send(200, "application/json", json);
+  });
+
+  // ---- /settings ----
+  server.on("/settings", []() {
+    if (server.hasArg("ms")) moveSpeed = server.arg("ms").toInt();
+    if (server.hasArg("ts")) turnSpeed = server.arg("ts").toInt();
+    addLog("Speed mv=" + String(moveSpeed) + " trn=" + String(turnSpeed));
+    server.send(200, "text/plain", "OK");
+  });
+  // ---- /fusioncfg ----
+  server.on("/fusioncfg", []() {
+    if (server.hasArg("wg"))  wGyro        = server.arg("wg").toFloat();
+    if (server.hasArg("we"))  wEncoder     = server.arg("we").toFloat();
+    if (server.hasArg("wl"))  wLidar       = server.arg("wl").toFloat();
+    if (server.hasArg("fmc")) fusedMaxCorr = server.arg("fmc").toInt();
+    addLog("Fusion wG=" + String(wGyro) + " wE=" + String(wEncoder) + " wL=" + String(wLidar));
+    server.send(200, "text/plain", "OK");
+  });
+  // ---- /correctcfg ----
+  server.on("/correctcfg", []() {
+    if (server.hasArg("gkp")) gyroKp       = server.arg("gkp").toFloat();
+    if (server.hasArg("gkd")) gyroKd       = server.arg("gkd").toFloat();
+    if (server.hasArg("gmc")) gyroMaxCorr  = server.arg("gmc").toInt();
+    if (server.hasArg("gdb")) gyroDeadband = server.arg("gdb").toFloat();
+    if (server.hasArg("ekp")) encKp        = server.arg("ekp").toFloat();
+    if (server.hasArg("emc")) encMaxCorr   = server.arg("emc").toInt();
+    if (server.hasArg("wkp")) wallKp       = server.arg("wkp").toFloat();
+    if (server.hasArg("wkd")) wallKd       = server.arg("wkd").toFloat();
+    if (server.hasArg("wdb")) wallDeadband = server.arg("wdb").toInt();
+    if (server.hasArg("wmc")) wallMaxCorr  = server.arg("wmc").toInt();
+    if (server.hasArg("wsl")) wallSensorLimit = server.arg("wsl").toInt();
+    addLog("Corr gKp=" + String(gyroKp) + " eKp=" + String(encKp) + " wKp=" + String(wallKp));
+    server.send(200, "text/plain", "OK");
+  });
+
+  // ---- /generalcfg ----
+  server.on("/generalcfg", []() {
+    if (server.hasArg("obs"))  obstacleThreshold = server.arg("obs").toInt();
+    if (server.hasArg("rso"))  rightSensorOffset = server.arg("rso").toInt();
+    if (server.hasArg("tsa"))  turnStopAngle     = server.arg("tsa").toFloat();
+    if (server.hasArg("ppr"))  PPR               = server.arg("ppr").toFloat();
+    if (server.hasArg("wd")) {
+      wheelDiameterMM    = server.arg("wd").toFloat();
+      wheelCircumference = PI * wheelDiameterMM;
+    }
+    if (server.hasArg("tbk"))  turnBackupMM   = server.arg("tbk").toFloat();
+    if (server.hasArg("tfwd")) turnForwardMM  = server.arg("tfwd").toFloat();
+    if (server.hasArg("bstr")) brakeStrength  = server.arg("bstr").toInt();
+    if (server.hasArg("bdur")) brakeDurationMs = server.arg("bdur").toInt();
+    addLog("Gen obs=" + String(obstacleThreshold) + " tsa=" + String(turnStopAngle));
+    server.send(200, "text/plain", "OK");
+  });
+  // ---- /mazecfg ----
+  server.on("/mazecfg", []() {
+    if (server.hasArg("nd"))   nodeDistMM     = server.arg("nd").toInt();
+    if (server.hasArg("at"))   afterTurnDist  = server.arg("at").toInt();
+    if (server.hasArg("fst"))  frontStopDist  = server.arg("fst").toInt();
+    if (server.hasArg("wdt"))  wallDetectDist = server.arg("wdt").toInt();
+    if (server.hasArg("mp"))   mazePauseMs    = server.arg("mp").toInt();
+    if (server.hasArg("tb"))   mazeTurnBackupMM = server.arg("tb").toInt();
+    if (server.hasArg("tc"))   mazeTurnCenterMM = server.arg("tc").toInt();
+    if (server.hasArg("a180")) turn180Angle   = server.arg("a180").toFloat();
+    addLog("MazeCfg node=" + String(nodeDistMM) + " at=" + String(afterTurnDist) +
+           " fst=" + String(frontStopDist) + " wdt=" + String(wallDetectDist));
+    server.send(200, "text/plain", "OK");
+  });
+  // ---- /command ----
+  server.on("/command", []() {
+    String act = server.arg("action");
+
+    if (act == "STOP") {
+      robotState = STOPPED; mazeActive = false; stopMotors();
+      addLog("CMD: STOP");
+    }
+    else if (act == "FORWARD") {
+      mazeActive = false;
+      resetEncoders(); lockHeading();
+      robotState = MOVING_STRAIGHT; addLog("CMD: FORWARD");
+    }
+    else if (act == "BACKWARD") {
+      mazeActive = false;
+      resetEncoders(); lockHeading();
+      robotState = MOVING_BACKWARD; addLog("CMD: BACKWARD");
+    }
+    else if (act == "LEFT_90") {
+      mazeActive = false;
+      resetEncoders(); robotState = TURN_LEFT_BACKUP; addLog("CMD: LEFT 90");
+    }
+    else if (act == "RIGHT_90") {
+      mazeActive = false;
+      resetEncoders(); robotState = TURN_RIGHT_BACKUP; addLog("CMD: RIGHT 90");
+    }
+    else if (act == "MOVE_DIST") {
+      mazeActive = false;
+      targetDistanceMM = server.arg("dist").toFloat();
+      resetEncoders(); lockHeading();
+      robotState = MOVING_DISTANCE;
+      addLog("CMD: FWD " + String(targetDistanceMM) + "mm");
+    }
+    else if (act == "BACK_DIST") {
+      mazeActive = false;
+      targetDistanceMM = server.arg("dist").toFloat();
+      resetEncoders(); lockHeading();
+      robotState = MOVING_BACKWARD_DISTANCE;
+      addLog("CMD: BACK " + String(targetDistanceMM) + "mm");
+    }
+    else if (act == "TURN_LEFT") {
+      mazeActive = false;
+      targetAngleDeg = server.arg("angle").toFloat();
+      currentYaw = 0; robotState = TURNING_ANGLE_LEFT;
+      addLog("CMD: RAW L " + String(targetAngleDeg) + "deg");
+    }
+    else if (act == "TURN_RIGHT") {
+      mazeActive = false;
+      targetAngleDeg = server.arg("angle").toFloat();
+      currentYaw = 0; robotState = TURNING_ANGLE_RIGHT;
+      addLog("CMD: RAW R " + String(targetAngleDeg) + "deg");
+    }
+    else if (act == "RESET_ENC") {
+      resetEncoders(); addLog("Encoders reset");
+    }
+    else if (act == "MAZE_RESET") {
+      robotState = STOPPED;
+      mazeActive = false; stopMotors();
+      initMaze();
+      floodFill();
+      robotRow = startRow; robotCol = startCol; robotDir = startDir;
+      addLog("MAZE RESET");
+    }
+    else if (act == "MAZE_START") {
+      // Parse start position
+      if (server.hasArg("sr")) startRow = constrain(server.arg("sr").toInt(), 0, 7);
+      if (server.hasArg("sc")) startCol = constrain(server.arg("sc").toInt(), 0, 7);
+      if (server.hasArg("sd")) startDir = constrain(server.arg("sd").toInt(), 0, 3);
+      // Reset maze
+      stopMotors();
+      initMaze();
+      floodFill();
+
+      robotRow = startRow;
+      robotCol = startCol;
+      robotDir = startDir;
+      mazeActive = true;
+
+      // Scan walls at the starting node immediately
+      scanMazeWalls();
+      addToPath();
+      floodFill();
+      addLog("MAZE START (" + String(robotRow) + "," + String(robotCol) +
+             ") dir=" + String(robotDir) +
+             " w=0x" + String(mazeWalls[robotRow][robotCol], HEX));
+      // Check if already at target
+      if (isTarget(robotRow, robotCol)) {
+        robotState = MAZE_DONE;
+        addLog("MAZE: Already at target!");
+      }
+      else {
+        // Robot starts at cell center, go straight to deciding next move
+        robotState = MAZE_DECIDE;
+        addLog("MZ decide from start");
+      }
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+  lastTime = millis();
+  addLog("System ready — 8x8 FloodFill");
+}
+
+// ============================================================
+// Main Loop
+// ============================================================
+void loop() {
+  server.handleClient();
+  // ---- Read sensors ----
+  if (lidarFront.isRangeComplete()) distFront = lidarFront.readRange();
+  if (lidarLeft.isRangeComplete())  distLeft  = lidarLeft.readRange();
+  if (lidarRight.isRangeComplete()) distRight = max(0, lidarRight.readRange() - rightSensorOffset);
+
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0f;
+  lastTime = now;
+
+  gyroX     = g.gyro.x * 57.2958f;
+  gyroY     = g.gyro.y * 57.2958f;
+  gyroZ_raw = g.gyro.z * 57.2958f;
+  accelX    = a.acceleration.x / 9.81f;
+  accelY    = a.acceleration.y / 9.81f;
+  accelZ    = a.acceleration.z / 9.81f;
+
+  if (abs(gyroZ_raw) > gyroDeadband) currentYaw += gyroZ_raw * dt;
+  // ---- State machine ----
+  switch (robotState) {
+
+    case STOPPED:
+      setMotors(0, 0);
+      break;
+
+    // =============== MANUAL MOVEMENT ===============
+    case MOVING_STRAIGHT:
+      if (distFront > 0 && distFront < obstacleThreshold) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("STOP: obstacle " + String(distFront) + "mm");
+      } else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    case MOVING_DISTANCE:
+      if (distFront > 0 && distFront < obstacleThreshold) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("STOP: obstacle " + String(distFront) + "mm");
+      } else if (encoderAvgDistanceMM() >= targetDistanceMM) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("DONE: " + String(encoderAvgDistanceMM(), 1) + "mm");
+      } else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    case MOVING_BACKWARD:
+      driveBackwardFused(moveSpeed);
+      break;
+    case MOVING_BACKWARD_DISTANCE:
+      if (encoderAvgDistanceMM() >= targetDistanceMM) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("DONE back: " + String(encoderAvgDistanceMM(), 1) + "mm");
+      } else {
+        driveBackwardFused(moveSpeed);
+      }
+      break;
+
+    // =============== MANUAL 3-PHASE TURNS ===============
+    case TURN_LEFT_BACKUP:
+      if (encoderAvgDistanceMM() >= turnBackupMM) {
+        resetEncoders();
+        currentYaw = 0;
+        robotState = TURN_LEFT_PIVOT;
+      } else {
+        setMotors(-moveSpeed, -moveSpeed);
+      }
+      break;
+
+    case TURN_LEFT_PIVOT:
+      if (abs(currentYaw) >= turnStopAngle) {
+        stopMotors();
+        delay(80);
+        resetEncoders(); lockHeading();
+        robotState = TURN_LEFT_FORWARD;
+      } else {
+        setMotors(0, turnSpeed);
+      }
+      break;
+
+    case TURN_LEFT_FORWARD:
+      if (encoderAvgDistanceMM() >= turnForwardMM) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("TL DONE");
+      } else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    case TURN_RIGHT_BACKUP:
+      if (encoderAvgDistanceMM() >= turnBackupMM) {
+        resetEncoders();
+        currentYaw = 0;
+        robotState = TURN_RIGHT_PIVOT;
+      } else {
+        setMotors(-moveSpeed, -moveSpeed);
+      }
+      break;
+
+    case TURN_RIGHT_PIVOT:
+      if (abs(currentYaw) >= turnStopAngle) {
+        stopMotors();
+        delay(80);
+        resetEncoders(); lockHeading();
+        robotState = TURN_RIGHT_FORWARD;
+      } else {
+        setMotors(turnSpeed, 0);
+      }
+      break;
+
+    case TURN_RIGHT_FORWARD:
+      if (encoderAvgDistanceMM() >= turnForwardMM) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("TR DONE");
+      } else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    // =============== RAW ANGLE TURNS ===============
+    case TURNING_ANGLE_LEFT:
+      if (abs(currentYaw) >= targetAngleDeg) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("RAW L done yaw=" + String(currentYaw, 1));
+      } else { setMotors(turnSpeed, 0); }
+      break;
+    case TURNING_ANGLE_RIGHT:
+      if (abs(currentYaw) >= targetAngleDeg) {
+        robotState = STOPPED;
+        stopMotors();
+        addLog("RAW R done yaw=" + String(currentYaw, 1));
+      } else { setMotors(0, turnSpeed); }
+      break;
+    // =============== MAZE SOLVING STATES ===============
+
+    case MAZE_SCAN:
+      // Pause for stable sensor readings, then scan walls
+      if (mazePauseStart > 0 && (millis() - mazePauseStart) < (unsigned long)mazePauseMs) {
+        setMotors(0, 0);
+        // Hold still
+        break;
+      }
+      mazePauseStart = 0;
+      // Scan walls using current LiDAR readings
+      scanMazeWalls();
+      addToPath();
+      addLog("MZ scan (" + String(robotRow) + "," + String(robotCol) +
+             ") w=0x" + String(mazeWalls[robotRow][robotCol], HEX));
+      robotState = MAZE_DECIDE;
+      break;
+
+    case MAZE_DECIDE: {
+      // Check if we reached the target
+      if (isTarget(robotRow, robotCol)) {
+        robotState = MAZE_DONE;
+        stopMotors();
+        mazeActive = false;
+        addLog("*** MAZE SOLVED! ***");
+        break;
+      }
+
+      // Run floodfill
+      floodFill();
+      // Find best direction
+      int bestDir = findBestDirection();
+      if (bestDir == -1 || mazeFlood[robotRow][robotCol] == 255) {
+        robotState = STOPPED;
+        stopMotors();
+        mazeActive = false;
+        addLog("MZ: No path to target!");
+        break;
+      }
+
+      mazeNextDir = bestDir;
+      int turnDiff = (mazeNextDir - robotDir + 4) % 4;
+      addLog("MZ decide: go dir " + String(mazeNextDir) +
+             " turn=" + String(turnDiff) +
+             " flood=" + String(mazeFlood[robotRow + DR[bestDir]][robotCol + DC[bestDir]]));
+      if (turnDiff == 0) {
+        // Straight — go forward directly
+        mazeMoveDist = nodeDistMM;
+        mazeFromReverse = false;
+        resetEncoders(); lockHeading();
+        robotState = MAZE_FORWARD;
+      } else if (turnDiff == 2) {
+        // 180-degree turnaround required
+        int nextR = robotRow + DR[bestDir];
+        int nextC = robotCol + DC[bestDir];
+
+        if (mazeVisited[nextR][nextC]) {
+          // Path is KNOWN: Safe to reverse without turning
+          mazeMoveDist = nodeDistMM;
+          resetEncoders(); lockHeading();
+          robotState = MAZE_REVERSE;
+          addLog("MZ reverse (known)");
+        } else {
+          // Path is UNKNOWN: Must face forward to scan, do a physical 180
+          mazeTurnDir = 1; // 1 = Right spin
+          mazePivotAngle = turn180Angle; // Uses the 170-180 deg target from config
+          resetEncoders();
+          robotState = MAZE_TURN_BACKUP; // Backs up first to clear the tail!
+          addLog("MZ 180 pivot (unknown)");
+        }
+      } else {
+        // Need to turn
+        if (turnDiff == 1) {       // Right 90
+          mazeTurnDir = 1;
+          mazePivotAngle = turnStopAngle;
+        } else {                    // Left 90 (turnDiff == 3)
+          mazeTurnDir = -1;
+          mazePivotAngle = turnStopAngle;
+        }
+        resetEncoders();
+        robotState = MAZE_TURN_BACKUP;
+      }
+      break;
+    }
+
+    case MAZE_TURN_BACKUP:
+      if (encoderAvgDistanceMM() >= mazeTurnBackupMM) {
+        resetEncoders();
+        currentYaw = 0;
+        robotState = MAZE_TURN_PIVOT;
+        addLog("MZ pivot start dir=" + String(mazeTurnDir));
+      } else {
+        setMotors(-moveSpeed, -moveSpeed);
+      }
+      break;
+    case MAZE_TURN_PIVOT:
+      if (abs(currentYaw) >= mazePivotAngle) {
+        stopMotors();
+        delay(80);
+        resetEncoders(); lockHeading();
+        robotState = MAZE_TURN_ADVANCE;
+        addLog("MZ pivot done yaw=" + String(currentYaw, 1));
+      } else {
+        if (mazeTurnDir == 1) {
+          setMotors(0, turnSpeed);
+          // Right turn
+        } else {
+          setMotors(turnSpeed, 0);
+          // Left turn
+        }
+      }
+      break;
+    case MAZE_TURN_ADVANCE:
+      if (encoderAvgDistanceMM() >= turnForwardMM) {
+        // Update robot direction
+        robotDir = mazeNextDir;
+        addLog("MZ advance done, dir=" + String(robotDir));
+        // Back up to center on node if configured
+        if (mazeTurnCenterMM > 0) {
+          resetEncoders();
+          robotState = MAZE_TURN_CENTER;
+        } else {
+          // After reverse the robot is at cell center, needs full cell distance
+          mazeMoveDist = mazeFromReverse ? nodeDistMM : afterTurnDist;
+          mazeFromReverse = false;
+          if (mazeMoveDist < 10) mazeMoveDist = 10;
+          resetEncoders(); lockHeading();
+          robotState = MAZE_FORWARD;
+          addLog("MZ fwd=" + String(mazeMoveDist));
+        }
+      } else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    case MAZE_TURN_CENTER:
+      if (encoderAvgDistanceMM() >= mazeTurnCenterMM) {
+        stopMotors();
+        delay(50);
+        // After reverse the robot is at cell center, needs full cell distance
+        mazeMoveDist = mazeFromReverse ? nodeDistMM : afterTurnDist;
+        mazeFromReverse = false;
+        if (mazeMoveDist < 10) mazeMoveDist = 10;
+        resetEncoders(); lockHeading();
+        robotState = MAZE_FORWARD;
+        addLog("MZ centered, fwd=" + String(mazeMoveDist));
+      } else {
+        setMotors(-moveSpeed, -moveSpeed);
+      }
+      break;
+
+    case MAZE_FORWARD:
+      if (encoderAvgDistanceMM() >= mazeMoveDist) {
+        // Arrived at distance target
+        stopMotors();
+        // Update position to next cell
+        robotRow += DR[robotDir];
+        robotCol += DC[robotDir];
+        robotRow = constrain(robotRow, 0, 7);
+        robotCol = constrain(robotCol, 0, 7);
+        addLog("MZ arrived (" + String(robotRow) + "," + String(robotCol) + ")");
+        // Go to scan
+        mazePauseStart = millis();
+        robotState = MAZE_SCAN;
+      }
+      else if (distFront > 0 && distFront < frontStopDist) {
+        // Front obstacle detected mid-move! Emergency handling
+        stopMotors();
+        addLog("MZ front wall mid-move! d=" + String(distFront));
+        // Mark front wall at current position
+        setWallBilateral(robotRow, robotCol, robotDir);
+        // Stay at current cell, re-decide
+        mazePauseStart = millis();
+        robotState = MAZE_SCAN;
+      }
+      else {
+        driveFused(moveSpeed);
+      }
+      break;
+
+    case MAZE_REVERSE:
+      // Drive backward one cell distance
+      if (encoderAvgDistanceMM() >= mazeMoveDist) {
+        stopMotors();
+        // Update position: move in the OPPOSITE of robotDir (going backward)
+        int backDir = (robotDir + 2) % 4;
+        robotRow += DR[backDir];
+        robotCol += DC[backDir];
+        robotRow = constrain(robotRow, 0, 7);
+        robotCol = constrain(robotCol, 0, 7);
+        // DO NOT flip robotDir — we're still facing the same way, just backing up
+        addLog("MZ reversed to (" + String(robotRow) + "," + String(robotCol) + ")");
+        addToPath();
+
+        // Scan walls at this cell and re-run floodfill
+        scanMazeWalls();
+        floodFill();
+        // Check if a non-180 route exists from here
+        int checkBest = findBestDirection();
+        if (checkBest == -1 || mazeFlood[robotRow][robotCol] == 255) {
+          robotState = STOPPED;
+          stopMotors();
+          mazeActive = false;
+          addLog("MZ: No path to target!");
+        } else {
+          int checkTurn = (checkBest - robotDir + 4) % 4;
+          if (checkTurn == 2) {
+            // Still needs 180 — keep reversing
+            mazeMoveDist = nodeDistMM;
+            resetEncoders(); lockHeading();
+            addLog("MZ keep reversing");
+            // stay in MAZE_REVERSE
+          } else {
+            // Found a non-180 route — pause, scan properly, then decide
+            mazeFromReverse = true;
+            mazePauseStart = millis();
+            robotState = MAZE_DECIDE;
+            addLog("MZ reverse done, can go dir=" + String(checkBest));
+          }
+        }
+      } else {
+        driveBackwardFused(moveSpeed);
+      }
+      break;
+
+    case MAZE_DONE:
+      setMotors(0, 0);
+      // Stay here until user stops or resets
+      break;
+  }
+}

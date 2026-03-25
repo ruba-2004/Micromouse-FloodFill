@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LUTFI — Micromouse FloodFill Maze Solver</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0c10;
+  --bg2: #111520;
+  --accent: #00e5ff;
+  --accent2: #ff3d71;
+  --accent3: #a3ff47;
+  --green: #00ff88;
+  --yellow: #ffd740;
+  --dim: #5a707f;
+  --text: #d0dde8;
+  --border: #1e2a3a;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { background: var(--bg); color: var(--text); font-family: 'Exo 2', sans-serif; }
+
+/* ── Slide container ── */
+.slide {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 60px 8%;
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+.slide::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+/* ── Typography ── */
+h1 { font-size: 3.2rem; font-weight: 900; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; margin-bottom: 12px; }
+h2 { font-size: 2.2rem; font-weight: 700; color: var(--accent); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 20px; }
+h3 { font-size: 1.3rem; font-weight: 600; color: var(--accent3); letter-spacing: .04em; text-transform: uppercase; margin: 24px 0 10px; }
+p, li { font-size: 1.05rem; line-height: 1.7; color: var(--text); }
+.subtitle { font-family: 'Share Tech Mono', monospace; font-size: 1rem; color: var(--dim); letter-spacing: .15em; margin-bottom: 30px; }
+.big-number { font-family: 'Share Tech Mono', monospace; font-size: 3rem; font-weight: 900; color: var(--accent3); }
+.label { font-family: 'Share Tech Mono', monospace; font-size: .75rem; color: var(--dim); text-transform: uppercase; letter-spacing: .12em; }
+
+/* ── Cards / grids ── */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin: 20px 0; }
+.card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+.card h3 { margin-top: 0; }
+.card ul { padding-left: 18px; }
+.card li { margin-bottom: 6px; }
+
+/* ── Code blocks ── */
+pre {
+  background: #080c12;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: .85rem;
+  line-height: 1.6;
+  color: var(--accent3);
+  margin: 14px 0;
+}
+code { font-family: 'Share Tech Mono', monospace; }
+.keyword { color: var(--accent); }
+.comment { color: #3a5a3a; }
+.string { color: var(--yellow); }
+.number { color: var(--accent2); }
+.fn { color: var(--green); }
+
+/* ── Equation boxes ── */
+.eq-box {
+  background: #0d1420;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  padding: 16px 22px;
+  margin: 14px 0;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 1rem;
+  color: var(--accent3);
+  line-height: 1.8;
+}
+
+/* ── Tables ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: .9rem;
+}
+th {
+  background: #161e2a;
+  color: var(--accent);
+  font-family: 'Share Tech Mono', monospace;
+  font-size: .75rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+}
+td {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+tr:hover { background: #111a28; }
+
+/* ── Flow diagram ── */
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
+.flow-box {
+  background: var(--bg2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: .8rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.flow-box.active { border-color: var(--green); color: var(--green); background: #0a1a10; }
+.flow-box.warn { border-color: var(--yellow); color: var(--yellow); }
+.flow-box.err { border-color: var(--accent2); color: var(--accent2); }
+.flow-arrow { color: var(--dim); font-size: 1.2rem; }
+
+/* ── Stat row ── */
+.stat-row { display: flex; flex-wrap: wrap; gap: 30px; margin: 24px 0; }
+.stat { text-align: center; }
+
+/* ── Highlight list ── */
+.hl { color: var(--accent3); font-weight: 600; }
+.hl2 { color: var(--accent); font-weight: 600; }
+.hl3 { color: var(--yellow); font-weight: 600; }
+
+/* ── Slide number ── */
+.slide-num {
+  position: absolute;
+  top: 20px; right: 30px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: .75rem;
+  color: var(--dim);
+  letter-spacing: .1em;
+}
+
+/* ── Two-col ── */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+@media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+
+/* ── Diagram styles ── */
+.layer-diagram { margin: 20px 0; }
+.layer {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-bottom: -1px;
+  position: relative;
+}
+.layer:nth-child(1) { background: #0a1a28; border-color: var(--accent); }
+.layer:nth-child(2) { background: #101a10; border-color: var(--green); }
+.layer:nth-child(3) { background: #1a1a0a; border-color: var(--yellow); }
+.layer-title { font-family: 'Share Tech Mono', monospace; font-size: .8rem; color: var(--accent); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
+.layer p { font-size: .9rem; }
+
+/* Nav dots */
+.nav-dots {
+  position: fixed; right: 20px; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: 10px; z-index: 100;
+}
+.nav-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid var(--dim); background: transparent;
+  cursor: pointer; transition: all .2s;
+}
+.nav-dot:hover, .nav-dot.act { background: var(--accent); border-color: var(--accent); }
+
+/* Print tweaks */
+@media print {
+  .slide { min-height: auto; page-break-after: always; padding: 30px 5%; }
+  .nav-dots { display: none; }
+  body { background: #fff; color: #222; }
+  h1, h2, h3, .keyword, .fn { color: #0066aa; }
+  .card { border-color: #ccc; background: #f8f8f8; }
+  pre { background: #f0f0f0; color: #222; border-color: #ccc; }
+}
+</style>
+</head>
+<body>
+
+<!-- NAV DOTS -->
+<div class="nav-dots" id="navDots"></div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 1 — TITLE
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s1">
+  <span class="slide-num">01 / 16</span>
+  <p class="label" style="margin-bottom:8px">Senior Design Project</p>
+  <h1>LUTFI</h1>
+  <h2 style="color:var(--accent3);font-size:1.6rem;margin-bottom:6px">Autonomous Micromouse Maze Solver</h2>
+  <p class="subtitle">ESP32 &bull; FloodFill BFS &bull; 8&times;8 Maze &bull; Cascaded Control &bull; Web Dashboard</p>
+  <div class="stat-row">
+    <div class="stat"><div class="big-number">1947</div><div class="label">Lines of Code</div></div>
+    <div class="stat"><div class="big-number">8&times;8</div><div class="label">Maze Grid</div></div>
+    <div class="stat"><div class="big-number">6</div><div class="label">Sensors</div></div>
+    <div class="stat"><div class="big-number">26</div><div class="label">FSM States</div></div>
+    <div class="stat"><div class="big-number">40+</div><div class="label">Tunable Parameters</div></div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 2 — PROJECT OVERVIEW
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s2">
+  <span class="slide-num">02 / 16</span>
+  <h2>Project Overview</h2>
+  <p style="max-width:900px;font-size:1.1rem;margin-bottom:24px">
+    <span class="hl">LUTFI</span> is an autonomous micromouse robot that explores and solves an <span class="hl2">8&times;8 grid maze</span> (20&thinsp;cm &times; 20&thinsp;cm cells) using the <span class="hl3">FloodFill algorithm</span>. It navigates from a corner to the center 4 cells, then returns home — all without human intervention.
+  </p>
+  <div class="card-grid">
+    <div class="card">
+      <h3>&#9654; Goal</h3>
+      <ul>
+        <li>Navigate from corner cell <code>(7,0)</code> to <strong>center 4 cells</strong> <code>(3,3)(3,4)(4,3)(4,4)</code></li>
+        <li>Discover walls in real-time using 3 LiDAR sensors</li>
+        <li>Solve using FloodFill BFS — recalculate after every cell</li>
+        <li>Return home by retracing the recorded path</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>&#9654; Key Features</h3>
+      <ul>
+        <li><span class="hl">Cascaded PID control</span> — LiDAR → Gyro → Encoder</li>
+        <li><span class="hl2">Real-time web dashboard</span> — maze canvas, tuning, controls</li>
+        <li><span class="hl3">Trapezoidal speed profile</span> — smooth acceleration/deceleration</li>
+        <li>3-phase node alignment (stabilize → straighten → center)</li>
+        <li>90° heading snapping to eliminate gyro drift</li>
+        <li>5-sample majority voting for reliable wall detection</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>&#9654; Specs</h3>
+      <ul>
+        <li><strong>Maze:</strong> 8&times;8 grid, 20 cm cell size</li>
+        <li><strong>Move speed:</strong> 130 PWM (configurable)</li>
+        <li><strong>Turn speed:</strong> 120 PWM (configurable)</li>
+        <li><strong>Control loop:</strong> ~300 Hz</li>
+        <li><strong>Dashboard update:</strong> 3.3 Hz (300 ms)</li>
+        <li><strong>WiFi:</strong> SSID "MEDOGP"</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 3 — HARDWARE OVERVIEW
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s3">
+  <span class="slide-num">03 / 16</span>
+  <h2>Hardware Architecture</h2>
+  <p class="subtitle">Dual-deck 3D-printed chassis &bull; 4-wheel drive &bull; 6 sensors</p>
+
+  <table>
+    <tr><th>Component</th><th>Model / Spec</th><th>Role</th><th>Interface</th></tr>
+    <tr><td><span class="hl2">Microcontroller</span></td><td>ESP32 DevKit</td><td>Main processor, WiFi AP, WebServer</td><td>—</td></tr>
+    <tr><td><span class="hl">LiDAR Left</span></td><td>VL53L0X (addr 0x30)</td><td>Detect left wall, centering, single-wall following</td><td>I²C Wire1 (SDA=5, SCL=17)</td></tr>
+    <tr><td><span class="hl">LiDAR Front</span></td><td>VL53L0X (addr 0x31)</td><td>Detect front wall, obstacle avoidance, mid-move stop</td><td>I²C Wire1 (SDA=5, SCL=17)</td></tr>
+    <tr><td><span class="hl">LiDAR Right</span></td><td>VL53L0X (addr 0x29)</td><td>Detect right wall, centering, single-wall following</td><td>I²C Wire1 (SDA=5, SCL=17)</td></tr>
+    <tr><td><span class="hl3">IMU</span></td><td>MPU6050 (gyro Z-axis)</td><td>Yaw tracking, heading control, turns, drift correction</td><td>I²C Wire (SDA=19, SCL=18)</td></tr>
+    <tr><td><span class="hl3">Encoder Left</span></td><td>Quadrature (360 PPR)</td><td>Distance measurement, wheel-slip detection</td><td>GPIO 33/32 (ISR)</td></tr>
+    <tr><td><span class="hl3">Encoder Right</span></td><td>Quadrature (360 PPR)</td><td>Distance measurement, differential correction</td><td>GPIO 34/35 (ISR)</td></tr>
+    <tr><td><span class="hl2">Motor Driver</span></td><td>H-Bridge (4-pin)</td><td>Dual DC motor control, forward/reverse/brake</td><td>GPIO 13,27 (L) / 25,26 (R)</td></tr>
+    <tr><td>Motors</td><td>2× DC geared motors</td><td>Drive wheels (32 mm diameter)</td><td>Via H-Bridge PWM</td></tr>
+  </table>
+
+  <h3>I²C Bus Architecture</h3>
+  <div class="two-col">
+    <div class="card">
+      <h3 style="color:var(--yellow)">Wire (Bus 0) — IMU</h3>
+      <p>SDA = GPIO 19, SCL = GPIO 18</p>
+      <p>MPU6050 @ address <code>0x68</code></p>
+      <p>Gyro range: ±500 °/s &bull; Filter: 21 Hz bandwidth</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--yellow)">Wire1 (Bus 1) — LiDARs</h3>
+      <p>SDA = GPIO 5, SCL = GPIO 17</p>
+      <p>3× VL53L0X with XSHUT for address assignment:</p>
+      <ul>
+        <li>XSHUT_LEFT = GPIO 15 → addr 0x30</li>
+        <li>XSHUT_FRONT = GPIO 4 → addr 0x31</li>
+        <li>XSHUT_RIGHT = GPIO 16 → addr 0x29</li>
+      </ul>
+      <p>Mode: <strong>Continuous ranging</strong></p>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 4 — SENSOR ROLES IN DETAIL
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s4">
+  <span class="slide-num">04 / 16</span>
+  <h2>Sensors — Role &amp; Need for Each</h2>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3 style="color:var(--accent)">VL53L0X LiDARs (×3)</h3>
+      <p><strong>Why 3 sensors?</strong> The robot needs to detect walls on 3 sides simultaneously — the 4th side (behind) is always open (it just came from there).</p>
+      <ul>
+        <li><span class="hl2">Front:</span> Detect front wall for maze mapping; emergency mid-move stop; obstacle threshold at 80 mm</li>
+        <li><span class="hl2">Left &amp; Right:</span> Detect side walls for maze mapping; used by LiDAR PID to keep the robot centered between walls</li>
+        <li><strong>Wall detection threshold:</strong> 150 mm (configurable)</li>
+        <li><strong>5-sample majority voting:</strong> Only marks a wall if 3+ of 5 samples agree — eliminates phantom walls from sensor noise</li>
+        <li><strong>Single-wall following:</strong> When only one wall is visible, the robot maintains <code>wallCenterTarget = 75 mm</code> distance</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3 style="color:var(--green)">MPU6050 IMU (Gyroscope)</h3>
+      <p><strong>Why a gyroscope?</strong> Encoders alone cannot detect heading drift (both wheels can drift together). The gyro provides absolute heading reference.</p>
+      <ul>
+        <li><strong>Yaw integration:</strong> <code>currentYaw += gyroZ_raw × dt</code> (dead reckoning)</li>
+        <li><strong>Deadband:</strong> Ignores readings below 0.3 °/s to prevent noise accumulation</li>
+        <li><strong>Heading lock:</strong> Every straight-line segment locks to a heading; PD controller maintains it</li>
+        <li><strong>90° snapping:</strong> After each turn or stop, heading is snapped to the nearest 90° multiple — corrects accumulated drift</li>
+        <li><strong>Turn detection:</strong> Pivot angle measured as <code>|currentYaw − prePivotYaw|</code></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3 style="color:var(--yellow)">Quadrature Encoders (×2)</h3>
+      <p><strong>Why encoders?</strong> The robot needs precise distance measurement to know when it has traveled exactly one cell (200 mm). Gyro and LiDAR don't measure distance.</p>
+      <ul>
+        <li><strong>PPR:</strong> 360 pulses per revolution</li>
+        <li><strong>Wheel diameter:</strong> 32 mm → circumference = π × 32 ≈ 100.5 mm</li>
+        <li><strong>Distance formula:</strong> <code>d = (|ticks| / PPR) × π × wheelDia</code></li>
+        <li><strong>Average distance:</strong> <code>(dL + dR) / 2</code> for robust measurement</li>
+        <li><strong>ISR-based:</strong> IRAM_ATTR interrupt handlers on rising/falling edges for real-time counting</li>
+        <li><strong>Differential backup:</strong> <code>(leftTicks − rightTicks)</code> detects wheel slip → adds small correction</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 5 — LIBRARIES
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s5">
+  <span class="slide-num">05 / 16</span>
+  <h2>Software — Libraries &amp; Architecture</h2>
+
+  <div class="two-col">
+    <div>
+      <h3>Libraries Used</h3>
+      <table>
+        <tr><th>Library</th><th>Purpose</th></tr>
+        <tr><td><code>Wire.h</code></td><td>I²C communication for both sensor buses (Wire and Wire1)</td></tr>
+        <tr><td><code>WiFi.h</code></td><td>ESP32 WiFi stack — connects to AP for dashboard access</td></tr>
+        <tr><td><code>WebServer.h</code></td><td>HTTP server on port 80 — serves dashboard HTML, handles API endpoints</td></tr>
+        <tr><td><code>Adafruit_VL53L0X.h</code></td><td>Driver for VL53L0X time-of-flight ranging sensors</td></tr>
+        <tr><td><code>Adafruit_MPU6050.h</code></td><td>Driver for MPU6050 IMU — gyroscope and accelerometer</td></tr>
+        <tr><td><code>Adafruit_Sensor.h</code></td><td>Unified sensor abstraction (required by Adafruit drivers)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Code Architecture</h3>
+      <div class="card" style="margin-top:10px">
+        <ul>
+          <li><strong>Single-file design</strong> — entire system in one .ino (1947 lines)</li>
+          <li><strong>Non-blocking state machine</strong> — 26 states, no <code>delay()</code> in maze logic</li>
+          <li><strong>ISR-based encoders</strong> — IRAM_ATTR for real-time tick counting</li>
+          <li><strong>Chunked HTML</strong> — dashboard sent via <code>server.sendContent()</code> to save RAM</li>
+          <li><strong>JSON API</strong> — <code>/data</code> endpoint streams sensor + maze data at 300 ms interval</li>
+          <li><strong>Configuration endpoints</strong> — <code>/cascadecfg</code>, <code>/correctcfg</code>, <code>/generalcfg</code>, <code>/mazecfg</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <h3>File Structure (single file)</h3>
+  <pre>
+Lines   1–  7 │ Library includes
+Lines  10– 33 │ WiFi config, pin definitions
+Lines  37– 53 │ Sensor objects &amp; readings
+Lines  57– 93 │ Tunable config: speeds, PID gains, control params
+Lines  95–113 │ Maze config: distances, tolerances, timings
+Lines 115–150 │ Maze data structures: walls, flood, visited, path
+Lines 153–182 │ State machine enum (26 states)
+Lines 220–228 │ ISR handlers for encoders
+Lines 232–267 │ Motor control &amp; encoder helper functions
+Lines 270–400 │ <strong>Cascaded control system</strong> (LiDAR→Gyro→Encoder fusion)
+Lines 403–540 │ Maze functions: floodFill, scanWalls, findBestDirection
+Lines 600–870 │ HTML dashboard (sent in chunks)
+Lines 870–990 │ Canvas drawing &amp; JavaScript
+Lines1005–1200│ Setup, server routes, config endpoints
+Lines1210–1300│ Command handler (MAZE_START, STOP, etc.)
+Lines1305–1947│ Main loop — sensor reading + full state machine
+</pre>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 6 — FLOODFILL ALGORITHM
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s6">
+  <span class="slide-num">06 / 16</span>
+  <h2>FloodFill BFS — Maze Solving Algorithm</h2>
+
+  <div class="two-col">
+    <div>
+      <h3>How It Works</h3>
+      <p>FloodFill assigns a <strong>distance value</strong> to every cell based on the minimum number of steps to reach the target. The robot always moves to the neighbor with the <strong>lowest flood value</strong>.</p>
+      <ol style="padding-left:18px;margin:14px 0">
+        <li>Seed target cells (3,3)(3,4)(4,3)(4,4) with value <strong>0</strong></li>
+        <li>BFS expands outward, incrementing values — respecting known walls</li>
+        <li>Robot moves to the reachable neighbor with the smallest flood value</li>
+        <li>After every cell visit: scan walls → recalculate flood values → decide again</li>
+      </ol>
+
+      <h3>Direction Priority (on tie)</h3>
+      <div class="flow">
+        <div class="flow-box active">Straight</div>
+        <span class="flow-arrow">▸</span>
+        <div class="flow-box">Right</div>
+        <span class="flow-arrow">▸</span>
+        <div class="flow-box">Left</div>
+        <span class="flow-arrow">▸</span>
+        <div class="flow-box warn">Back</div>
+      </div>
+      <p style="font-size:.9rem;color:var(--dim)">Preferring straight reduces turn time and improves overall solve speed.</p>
+    </div>
+    <div>
+      <h3>FloodFill Code</h3>
+<pre>
+<span class="keyword">void</span> <span class="fn">floodFill</span>() {
+  <span class="fn">memset</span>(mazeFlood, <span class="number">255</span>, <span class="keyword">sizeof</span>(mazeFlood));
+
+  <span class="comment">// BFS queue</span>
+  uint8_t qr[<span class="number">64</span>], qc[<span class="number">64</span>];
+  <span class="keyword">int</span> front = <span class="number">0</span>, back = <span class="number">0</span>;
+
+  <span class="comment">// Seed: center 4 target cells</span>
+  <span class="keyword">for</span> (<span class="keyword">int</span> r = <span class="number">3</span>; r <= <span class="number">4</span>; r++)
+    <span class="keyword">for</span> (<span class="keyword">int</span> c = <span class="number">3</span>; c <= <span class="number">4</span>; c++) {
+      mazeFlood[r][c] = <span class="number">0</span>;
+      qr[back] = r; qc[back] = c; back++;
+    }
+
+  <span class="keyword">while</span> (front < back) {
+    <span class="keyword">int</span> r = qr[front], c = qc[front]; front++;
+    uint8_t nextVal = mazeFlood[r][c] + <span class="number">1</span>;
+
+    <span class="keyword">for</span> (<span class="keyword">int</span> d = <span class="number">0</span>; d < <span class="number">4</span>; d++) {
+      <span class="keyword">if</span> (mazeWalls[r][c] & (<span class="number">1</span> << d)) <span class="keyword">continue</span>;
+      <span class="keyword">int</span> nr = r + DR[d], nc = c + DC[d];
+      <span class="keyword">if</span> (mazeFlood[nr][nc] > nextVal) {
+        mazeFlood[nr][nc] = nextVal;
+        qr[back] = nr; qc[back] = nc; back++;
+      }
+    }
+  }
+}
+</pre>
+    </div>
+  </div>
+
+  <h3>Wall Scanning — 5-Sample Majority Voting</h3>
+<pre>
+<span class="comment">// Take 5 readings, mark wall only if 3+ samples detect it</span>
+<span class="keyword">for</span> (<span class="keyword">int</span> s = <span class="number">0</span>; s < <span class="number">5</span>; s++) {
+  <span class="keyword">if</span> (distFront < wallDetectDist) frontHits++;
+  <span class="keyword">if</span> (distLeft  < wallDetectDist) leftHits++;
+  <span class="keyword">if</span> (distRight < wallDetectDist) rightHits++;
+  <span class="fn">delay</span>(<span class="number">20</span>);
+}
+<span class="keyword">int</span> threshold = <span class="number">3</span>;  <span class="comment">// majority vote threshold</span>
+<span class="keyword">if</span> (frontHits >= threshold) <span class="fn">setWallBilateral</span>(robotRow, robotCol, frontDir);
+</pre>
+  <p><strong>Why bilateral?</strong> <code>setWallBilateral()</code> marks the wall from both sides — if cell (3,2) has a wall on the East side, cell (3,3) automatically gets a wall on the West side. This ensures consistency.</p>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 7 — CASCADED CONTROL SYSTEM
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s7">
+  <span class="slide-num">07 / 16</span>
+  <h2>Cascaded Control System</h2>
+  <p class="subtitle">Three-layer sensor fusion: LiDAR PID → Gyro PD → Encoder Backup</p>
+
+  <div class="layer-diagram">
+    <div class="layer">
+      <div class="layer-title" style="color:var(--accent)">Outer Loop — LiDAR PID → Heading Adjustment</div>
+      <p>Measures wall distances, calculates heading offset to keep the robot centered between walls.</p>
+      <p style="margin-top:6px;font-size:.85rem;color:var(--dim)">Output: headingAdjust (degrees) — added to headingLock</p>
+    </div>
+    <div class="layer">
+      <div class="layer-title" style="color:var(--green)">Inner Loop — Gyro PD → Motor Correction</div>
+      <p>Tracks (headingLock + headingAdjust) using gyroscope. PD controller outputs a PWM correction.</p>
+      <p style="margin-top:6px;font-size:.85rem;color:var(--dim)">Output: gyroCorr (PWM value) — primary motor correction</p>
+    </div>
+    <div class="layer">
+      <div class="layer-title" style="color:var(--yellow)">Backup — Encoder Differential</div>
+      <p>Compares left vs right encoder ticks. Detects wheel slip that gyro can't see. Added at 30% weight.</p>
+      <p style="margin-top:6px;font-size:.85rem;color:var(--dim)">Output: encCorr × 0.3 — safety net correction</p>
+    </div>
+  </div>
+
+  <h3>Why Cascaded? (not weighted average)</h3>
+  <p>A <em>weighted average</em> of all sensors fights itself — the LiDAR says "turn right" and the gyro says "hold straight" simultaneously. In a <strong>cascaded architecture</strong>, the LiDAR <em>adjusts the target heading</em>, and the gyro <em>tracks that target</em>. They work in harmony, not against each other.</p>
+
+  <h3>Control Equations</h3>
+  <div class="eq-box">
+    <strong>Outer Loop (LiDAR PID):</strong><br>
+    wallErr = distRight − distLeft &emsp; <span style="color:var(--dim)">(dual walls)</span><br>
+    wallErr = wallCenterTarget − distLeft &emsp; <span style="color:var(--dim)">(left wall only)</span><br>
+    wallErr = distRight − wallCenterTarget &emsp; <span style="color:var(--dim)">(right wall only)</span><br><br>
+    P = wallHeadingKp × wallErr &emsp; <span style="color:var(--dim)">(0.03)</span><br>
+    I += wallHeadingRate × wallErr &emsp; <span style="color:var(--dim)">(0.004/cycle, clamped ±3.0°)</span><br>
+    D = wallHeadingKd × Δ(wallErr) &emsp; <span style="color:var(--dim)">(0.01)</span><br>
+    headingAdjust = P + I + D
+  </div>
+  <div class="eq-box">
+    <strong>Inner Loop (Gyro PD):</strong><br>
+    gyroErr = currentYaw − (headingLock + headingAdjust)<br>
+    gyroCorr = −(gyroKp × gyroErr + gyroKd × Δ(gyroErr))<br>
+    <span style="color:var(--dim)">gyroKp = 2.50, gyroKd = 0.60, max = ±35 PWM</span>
+  </div>
+  <div class="eq-box">
+    <strong>Backup (Encoder):</strong><br>
+    encErr = leftTicks − rightTicks<br>
+    encCorr = encKp × encErr &emsp; <span style="color:var(--dim)">(encKp = 0.12, max = ±15)</span>
+  </div>
+  <div class="eq-box">
+    <strong>Combined:</strong><br>
+    totalCorr = gyroCorr + 0.3 × encCorr &emsp; <span style="color:var(--dim)">(clamped to ±fusedMaxCorr = 35)</span><br>
+    leftMotor = speed − totalCorr<br>
+    rightMotor = speed + totalCorr
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 8 — STATE MACHINE OVERVIEW
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s8">
+  <span class="slide-num">08 / 16</span>
+  <h2>State Machine — 26 States</h2>
+  <p class="subtitle">Non-blocking FSM — no delay() calls in maze logic</p>
+
+  <div class="two-col">
+    <div>
+      <h3>Manual States (13)</h3>
+      <table>
+        <tr><th>State</th><th>Purpose</th></tr>
+        <tr><td><code>STOPPED</code></td><td>Idle — motors off</td></tr>
+        <tr><td><code>MOVING_STRAIGHT</code></td><td>Forward with heading correction</td></tr>
+        <tr><td><code>MOVING_DISTANCE</code></td><td>Forward N mm then stop</td></tr>
+        <tr><td><code>MOVING_BACKWARD</code></td><td>Reverse with heading correction</td></tr>
+        <tr><td><code>MOVING_BACKWARD_DISTANCE</code></td><td>Reverse N mm then stop</td></tr>
+        <tr><td><code>TURN_LEFT_BACKUP</code></td><td>Backup 60 mm before left pivot</td></tr>
+        <tr><td><code>TURN_LEFT_PIVOT</code></td><td>Pivot left 85°</td></tr>
+        <tr><td><code>TURN_LEFT_FORWARD</code></td><td>Advance 60 mm after left pivot</td></tr>
+        <tr><td><code>TURN_RIGHT_BACKUP</code></td><td>Same for right turn</td></tr>
+        <tr><td><code>TURN_RIGHT_PIVOT</code></td><td>Pivot right 85°</td></tr>
+        <tr><td><code>TURN_RIGHT_FORWARD</code></td><td>Advance after right pivot</td></tr>
+        <tr><td><code>TURNING_ANGLE_LEFT</code></td><td>Raw N° left turn</td></tr>
+        <tr><td><code>TURNING_ANGLE_RIGHT</code></td><td>Raw N° right turn</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Maze States (13)</h3>
+      <table>
+        <tr><th>State</th><th>Purpose</th></tr>
+        <tr><td><code>MAZE_SCAN</code></td><td>Scan walls at current cell</td></tr>
+        <tr><td><code>MAZE_DECIDE</code></td><td>FloodFill → choose next direction</td></tr>
+        <tr><td><code>MAZE_PRE_TURN</code></td><td>Straighten heading before turn</td></tr>
+        <tr><td><code>MAZE_TURN_BACKUP</code></td><td>Back up 60mm for turn clearance</td></tr>
+        <tr><td><code>MAZE_TURN_PIVOT</code></td><td>Differential center-pivot 90°</td></tr>
+        <tr><td><code>MAZE_TURN_SETTLE</code></td><td>Coast 80ms → PD straighten</td></tr>
+        <tr><td><code>MAZE_TURN_ADVANCE</code></td><td>Advance 60mm after pivot</td></tr>
+        <tr><td><code>MAZE_TURN_CENTER</code></td><td>Optional backup for centering</td></tr>
+        <tr><td><code>MAZE_NODE_CENTER</code></td><td>3-phase alignment at node</td></tr>
+        <tr><td><code>MAZE_FORWARD</code></td><td>Trapezoidal speed, move 1 cell</td></tr>
+        <tr><td><code>MAZE_REVERSE</code></td><td>Backward 1 cell (replaces 180°)</td></tr>
+        <tr><td><code>MAZE_RETURN_DECIDE</code></td><td>Retrace recorded path home</td></tr>
+        <tr><td><code>MAZE_DONE</code></td><td>Motors off — solved!</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 9 — MAZE SOLVE FLOW
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s9">
+  <span class="slide-num">09 / 16</span>
+  <h2>Maze Solve — Flow Diagram</h2>
+
+  <h3>Main Solve Loop</h3>
+  <div class="flow">
+    <div class="flow-box active">MAZE_START</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">SCAN</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">DECIDE</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box warn">FORWARD / REVERSE / TURN</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">NODE_CENTER</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">SCAN</div>
+    <span class="flow-arrow">↺</span>
+  </div>
+  <p style="font-size:.9rem;margin:10px 0">The loop repeats until the robot reaches the center target cells.</p>
+
+  <h3>Turn Sequence (6 sub-states)</h3>
+  <div class="flow">
+    <div class="flow-box">PRE_TURN</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">BACKUP</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box warn">PIVOT</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">SETTLE</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">ADVANCE</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box active">FORWARD</div>
+  </div>
+  <table style="margin-top:16px">
+    <tr><th>Phase</th><th>What Happens</th><th>Why?</th></tr>
+    <tr><td><span class="hl2">PRE_TURN</span></td><td>PD straighten to snapped heading</td><td>Ensures the robot is perfectly aligned before turning — otherwise the turn angle will be off</td></tr>
+    <tr><td><span class="hl2">BACKUP</span></td><td>Reverse 60 mm with heading correction</td><td>Creates clearance so the robot pivots at the cell center, not at the edge</td></tr>
+    <tr><td><span class="hl3">PIVOT</span></td><td>Differential center-pivot: <code>setMotors(-120, 120)</code></td><td>Center-pivot (both motors opposite) rotates around the robot's center, not one wheel</td></tr>
+    <tr><td><span class="hl">SETTLE</span></td><td>80 ms coast → PD straighten to new snapped heading</td><td>Momentum carries past target angle; coast lets gyro settle, then PD corrects overshoot</td></tr>
+    <tr><td><span class="hl">ADVANCE</span></td><td>Drive forward 60 mm</td><td>Re-centers the robot on the cell after the backup</td></tr>
+    <tr><td><span class="hl3">FORWARD</span></td><td>Trapezoidal move to next cell</td><td>Navigate to the next grid cell with smooth speed profile</td></tr>
+  </table>
+
+  <h3>Return Path</h3>
+  <div class="flow">
+    <div class="flow-box active">TARGET REACHED</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">RETURN_DECIDE</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box warn">Walk pathR/pathC backward</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box">FORWARD/REVERSE/TURN</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-box active">HOME!</div>
+  </div>
+  <p style="font-size:.9rem;margin:10px 0">The robot records every cell it visits in <code>pathR[]</code> / <code>pathC[]</code>. After reaching the target, <code>MAZE_RETURN_DECIDE</code> walks this array backward, issuing straight/turn/reverse commands to retrace the exact path.</p>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 10 — NODE ALIGNMENT
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s10">
+  <span class="slide-num">10 / 16</span>
+  <h2>Node Alignment — 3-Phase Centering</h2>
+
+  <p style="max-width:800px;margin-bottom:20px">When the robot arrives at a cell, it must be perfectly centered and facing the correct direction before scanning walls — otherwise sensor readings will be skewed.</p>
+
+  <div class="card-grid" style="grid-template-columns: repeat(3, 1fr)">
+    <div class="card">
+      <h3 style="color:var(--accent)">Phase 0: Stabilize</h3>
+      <p><strong>Duration:</strong> 80 ms</p>
+      <p>Motors coast (no braking). Gyro readings stabilize. Then snap heading to the nearest 90° from <code>mazeStartYaw</code>.</p>
+      <div class="eq-box" style="font-size:.8rem">
+        relYaw = currentYaw − mazeStartYaw<br>
+        snapped = round(relYaw / 90) × 90 + mazeStartYaw
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--green)">Phase 1: Straighten</h3>
+      <p><strong>Max time:</strong> 500 ms &emsp; <strong>Tolerance:</strong> 1.5°</p>
+      <p>PD controller pivots the robot to match the snapped heading. Minimum motor power = 10 PWM to overcome static friction.</p>
+      <div class="eq-box" style="font-size:.8rem">
+        pivotPwr = −(gyroKp × headErr + gyroKd × Δerr)<br>
+        Clamped to ±30 PWM<br>
+        setMotors(−pwr, pwr) for in-place pivot
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--yellow)">Phase 2: Center</h3>
+      <p><strong>Max time:</strong> 300 ms &emsp; <strong>Tolerance:</strong> 8 mm</p>
+      <p>Uses side LiDARs to center laterally. Gentle nudge pivot: <code>setMotors(nudge, −nudge)</code></p>
+      <div class="eq-box" style="font-size:.8rem">
+        Both walls: cErr = distRight − distLeft<br>
+        Left only: cErr = centerTarget − distLeft<br>
+        Right only: cErr = distRight − centerTarget<br>
+        nudge = 0.15 × cErr (clamped ±15)
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 11 — TRAPEZOIDAL SPEED
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s11">
+  <span class="slide-num">11 / 16</span>
+  <h2>Trapezoidal Speed Profile</h2>
+
+  <div class="two-col">
+    <div>
+      <h3>Why Trapezoidal?</h3>
+      <ul>
+        <li><strong>Ramp up:</strong> Prevents wheel spin at launch — tires grip the maze floor better</li>
+        <li><strong>Cruise:</strong> Full speed for efficiency during middle of cell transit</li>
+        <li><strong>Ramp down:</strong> Controlled deceleration eliminates overshoot and ensures precise stopping at the next cell</li>
+      </ul>
+      <p style="margin-top:14px">Without this, the robot would slam into walls or overshoot cell boundaries.</p>
+
+      <h3>Parameters</h3>
+      <table>
+        <tr><th>Param</th><th>Default</th><th>Effect</th></tr>
+        <tr><td><code>mazeMinSpeed</code></td><td>70</td><td>Minimum PWM during ramp</td></tr>
+        <tr><td><code>mazeAccelDist</code></td><td>30 mm</td><td>Distance to ramp up to full speed</td></tr>
+        <tr><td><code>mazeDecelDist</code></td><td>40 mm</td><td>Distance before target to start slowing</td></tr>
+        <tr><td><code>moveSpeed</code></td><td>130</td><td>Cruise speed (full PWM)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Speed Profile Code</h3>
+<pre>
+<span class="keyword">int</span> <span class="fn">mazeSmoothSpeed</span>(
+    <span class="keyword">int</span> baseSpeed,
+    <span class="keyword">float</span> distTraveled,
+    <span class="keyword">float</span> totalDist) {
+
+  <span class="keyword">float</span> distRemaining = totalDist - distTraveled;
+
+  <span class="comment">// Ramp UP at start</span>
+  <span class="keyword">if</span> (distTraveled < mazeAccelDist) {
+    <span class="keyword">float</span> ratio = distTraveled / mazeAccelDist;
+    <span class="keyword">return</span> minSpd + (baseSpeed - minSpd) * ratio;
+  }
+
+  <span class="comment">// Ramp DOWN near end</span>
+  <span class="keyword">if</span> (distRemaining < mazeDecelDist) {
+    <span class="keyword">float</span> ratio = distRemaining / mazeDecelDist;
+    <span class="keyword">return</span> minSpd + (baseSpeed - minSpd) * ratio;
+  }
+
+  <span class="comment">// Cruise at full speed</span>
+  <span class="keyword">return</span> baseSpeed;
+}
+</pre>
+      <div style="background:#080c12;border:1px solid var(--border);border-radius:8px;padding:16px;margin-top:14px;text-align:center">
+        <div style="display:flex;align-items:flex-end;justify-content:center;gap:2px;height:80px;">
+          <div style="width:16px;background:var(--accent);border-radius:3px 3px 0 0" data-h="20"></div>
+          <div style="width:16px;background:var(--accent);border-radius:3px 3px 0 0" data-h="40"></div>
+          <div style="width:16px;background:var(--accent);border-radius:3px 3px 0 0" data-h="60"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--green);border-radius:3px 3px 0 0" data-h="80"></div>
+          <div style="width:16px;background:var(--yellow);border-radius:3px 3px 0 0" data-h="65"></div>
+          <div style="width:16px;background:var(--yellow);border-radius:3px 3px 0 0" data-h="45"></div>
+          <div style="width:16px;background:var(--yellow);border-radius:3px 3px 0 0" data-h="30"></div>
+          <div style="width:16px;background:var(--accent2);border-radius:3px 3px 0 0" data-h="15"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:.65rem;color:var(--dim);font-family:'Share Tech Mono'">
+          <span>ACCEL (30mm)</span>
+          <span>CRUISE (130 PWM)</span>
+          <span>DECEL (40mm)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 12 — HEADING SNAPPING
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s12">
+  <span class="slide-num">12 / 16</span>
+  <h2>90° Heading Snapping — Drift Elimination</h2>
+
+  <div class="two-col">
+    <div>
+      <h3>The Problem</h3>
+      <p>Gyroscopes drift over time — a 0.5°/s bias can accumulate to <strong>30° of error in just 60 seconds</strong>. In a maze where every turn must be exactly 90°, this is catastrophic.</p>
+
+      <h3>The Solution</h3>
+      <p>The maze has a strict 90° grid. After <em>every turn</em> and <em>every node stop</em>, the robot snaps its heading target to the <strong>nearest 90° multiple</strong> relative to its starting orientation.</p>
+
+      <h3>How It Works</h3>
+      <ol style="padding-left:18px">
+        <li>When MAZE_START is pressed, record <code>mazeStartYaw</code></li>
+        <li>At every lock point, snap heading to nearest 90° grid line</li>
+        <li>The gyro PD controller tracks this <em>corrected</em> heading, not the raw drifting value</li>
+      </ol>
+
+      <p style="margin-top:14px"><strong>Result:</strong> Even after 50+ turns, the heading error stays within 1.5° — without any external correction.</p>
+    </div>
+    <div>
+      <h3>Snapping Code</h3>
+<pre>
+<span class="keyword">void</span> <span class="fn">lockHeadingSnapped</span>() {
+  <span class="keyword">float</span> relYaw = currentYaw - mazeStartYaw;
+
+  <span class="comment">// Snap to nearest 90° grid line</span>
+  headingLock = <span class="fn">round</span>(relYaw / <span class="number">90.0</span>)
+              * <span class="number">90.0</span>
+              + mazeStartYaw;
+
+  <span class="comment">// Reset all PID state</span>
+  wallHeadingOffset = <span class="number">0</span>;
+  prevWallErr = <span class="number">0</span>;
+  lastGyroErr = <span class="number">0</span>;
+  lastWallErr = <span class="number">0</span>;
+  encLeftStart  = leftEncoderTicks;
+  encRightStart = rightEncoderTicks;
+}
+</pre>
+      <h3>Example</h3>
+      <div class="card">
+        <p>Start heading: <code>mazeStartYaw = 5.2°</code></p>
+        <p>After 3 turns, raw yaw: <code>currentYaw = 278.1°</code></p>
+        <p>relYaw = 278.1 − 5.2 = <span class="hl2">272.9°</span></p>
+        <p>Snapped: round(272.9/90) × 90 = 3 × 90 = <span class="hl">270°</span></p>
+        <p>headingLock = 270 + 5.2 = <span class="hl3">275.2°</span></p>
+        <p style="color:var(--dim);font-size:.85rem;margin-top:6px">Error corrected: 278.1° → 275.2° (a 2.9° drift fixed)</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 13 — MOTOR & ENCODER
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s13">
+  <span class="slide-num">13 / 16</span>
+  <h2>DC Motors &amp; Encoder System</h2>
+
+  <div class="two-col">
+    <div>
+      <h3>Motor Control</h3>
+      <p>Two DC geared motors driven by an H-bridge with 4 GPIO pins. PWM range: 0–255.</p>
+<pre>
+<span class="keyword">void</span> <span class="fn">setMotors</span>(<span class="keyword">int</span> L, <span class="keyword">int</span> R) {
+  L = <span class="fn">constrain</span>(L, -<span class="number">255</span>, <span class="number">255</span>);
+  R = <span class="fn">constrain</span>(R, -<span class="number">255</span>, <span class="number">255</span>);
+  <span class="comment">// Positive = forward, negative = reverse</span>
+  <span class="keyword">if</span> (L > <span class="number">0</span>) { <span class="fn">analogWrite</span>(IN1, L); <span class="fn">analogWrite</span>(IN2, <span class="number">0</span>); }
+  <span class="keyword">else</span>        { <span class="fn">analogWrite</span>(IN1, <span class="number">0</span>); <span class="fn">analogWrite</span>(IN2, -L); }
+  <span class="comment">// Same for right motor (IN3, IN4)</span>
+}
+</pre>
+      <h3>Active Braking</h3>
+<pre>
+<span class="keyword">void</span> <span class="fn">stopMotors</span>() {
+  <span class="fn">setMotors</span>(-brakeStrength, -brakeStrength);
+  <span class="fn">delay</span>(brakeDurationMs);  <span class="comment">// 40ms reverse pulse</span>
+  <span class="fn">setMotors</span>(<span class="number">0</span>, <span class="number">0</span>);
+}
+</pre>
+      <p style="font-size:.9rem">A brief reverse pulse stops the motors quickly instead of coasting. <code>brakeStrength=60</code>, <code>brakeDurationMs=40</code></p>
+    </div>
+    <div>
+      <h3>Quadrature Encoder ISRs</h3>
+<pre>
+<span class="keyword">void</span> IRAM_ATTR <span class="fn">readLeftEncoder</span>() {
+  <span class="keyword">if</span> (<span class="fn">digitalRead</span>(ENC_LEFT_A) ==
+      <span class="fn">digitalRead</span>(ENC_LEFT_B))
+    leftEncoderTicks++;
+  <span class="keyword">else</span>
+    leftEncoderTicks--;
+}
+</pre>
+      <p style="margin-top:10px"><strong>IRAM_ATTR</strong>: Places the ISR in internal RAM — critical for real-time performance on ESP32. Without it, ISR code in flash would stall during WiFi/SPI operations.</p>
+
+      <h3>Distance Calculation</h3>
+      <div class="eq-box">
+        wheelCirc = π × wheelDiameter = π × 32 mm ≈ 100.5 mm<br><br>
+        distance = (|ticks| / PPR) × wheelCirc<br>
+        = (|ticks| / 360) × 100.5 mm<br><br>
+        avgDist = (distLeft + distRight) / 2
+      </div>
+      <p style="font-size:.9rem;margin-top:10px"><strong>Why average both wheels?</strong> If one wheel slips on a dusty surface, the average gives a more robust estimate than either wheel alone.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 14 — WEB DASHBOARD
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s14">
+  <span class="slide-num">14 / 16</span>
+  <h2>Web Dashboard — Real-Time Monitoring</h2>
+  <p class="subtitle">Served over WiFi • Canvas maze visualization • Live tuning</p>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3 style="color:var(--accent)">Card 1: Maze Visualization</h3>
+      <ul>
+        <li>Live 8×8 canvas drawn with JS every 300 ms</li>
+        <li>Shows walls, flood values, visited cells, robot position &amp; direction</li>
+        <li>Path drawn as green line connecting visited cells</li>
+        <li>Target cells highlighted in yellow</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--green)">Card 2: Controls</h3>
+      <ul>
+        <li><strong>RUN MAZE</strong> — start solving with configurable start position</li>
+        <li><strong>STOP</strong> — emergency stop, kills all movement</li>
+        <li><strong>Manual controls</strong> — Forward, Backward, Left 90, Right 90</li>
+        <li><strong>Distance/Angle</strong> — move exact mm or rotate exact degrees</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--yellow)">Card 3: Sensors</h3>
+      <ul>
+        <li>LiDAR bars (Left, Front, Right) with numeric readout in mm</li>
+        <li>IMU: Yaw, Heading Lock, Raw Gyro Z (°/s)</li>
+        <li>Encoders: Left/Right tick counts, average distance, progress bar</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Card 4: Fusion &amp; State</h3>
+      <ul>
+        <li>Correction bars: Gyro, Encoder, LiDAR, Fused — shows magnitude and direction</li>
+        <li>Robot state badge (colored by category)</li>
+        <li>Event log — last 30 messages, auto-scrolling</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Dashboard Tunable Parameters</h3>
+  <table style="font-size:.85rem">
+    <tr><th>Section</th><th>Parameters</th><th>What They Control</th></tr>
+    <tr><td><span class="hl2">Cascaded Control</span></td><td>fusedMaxCorr, wallHeadingKp/Kd/Rate/Max</td><td>Overall correction limit; LiDAR outer-loop PID gains and integral limits</td></tr>
+    <tr><td><span class="hl">Gyro PD</span></td><td>gyroKp, gyroKd, gyroMaxCorr, gyroDeadband</td><td>Inner-loop heading tracking: responsiveness, damping, max correction PWM, noise threshold</td></tr>
+    <tr><td><span class="hl3">Encoder</span></td><td>encKp, encMaxCorr</td><td>Backup correction gain and limit — higher = more aggressive wheel-slip correction</td></tr>
+    <tr><td>Wall LiDAR</td><td>wallKp, wallKd, wallDeadband, wallMaxCorr, wallSensorLimit</td><td>Raw LiDAR correction gains (used for display; cascaded uses wallHeading params)</td></tr>
+    <tr><td>General</td><td>obstacleThreshold, rightSensorOffset, turnStopAngle, PPR, wheelDia, turnBackup/Forward, brakeStrength/Duration</td><td>Physical robot calibration — obstacle distance, encoder resolution, wheel size, turn geometry</td></tr>
+    <tr><td><span class="hl2">Maze Distances</span></td><td>nodeDistMM, afterTurnDist, frontStopDist, wallDetectDist, mazePauseMs, turnBackup, wallCenter, minSpeed, accel/decelDist, nodeCenterMs/Tol, straightenMs/Tol, turn180Angle</td><td>Cell-to-cell distance, turn clearances, speed profile, node alignment timing and tolerances</td></tr>
+  </table>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 15 — KEY FUNCTIONS
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s15">
+  <span class="slide-num">15 / 16</span>
+  <h2>Key Functions Reference</h2>
+
+  <table style="font-size:.85rem">
+    <tr><th>Function</th><th>Lines</th><th>Purpose</th></tr>
+    <tr><td><code>setMotors(L, R)</code></td><td>232</td><td>Set left/right motor PWM (−255 to 255). Handles direction via H-bridge.</td></tr>
+    <tr><td><code>stopMotors()</code></td><td>246</td><td>Active braking: brief reverse pulse then coast. Configurable strength/duration.</td></tr>
+    <tr><td><code>encoderAvgDistanceMM()</code></td><td>256</td><td>Returns average distance from both encoders in mm.</td></tr>
+    <tr><td><code>resetEncoders()</code></td><td>263</td><td>Zeroes both tick counters — called before every measured move.</td></tr>
+    <tr><td><code>straightLineCorrection()</code></td><td>274</td><td><strong>Core control function.</strong> Cascaded LiDAR→Gyro→Encoder fusion. Returns PWM correction.</td></tr>
+    <tr><td><code>driveFused(spd)</code></td><td>372</td><td>Drive forward at <code>spd</code> with cascaded correction applied.</td></tr>
+    <tr><td><code>driveBackwardFused(spd)</code></td><td>378</td><td>Same as above but in reverse.</td></tr>
+    <tr><td><code>lockHeading()</code></td><td>384</td><td>Capture current yaw as heading target. Reset all PID integrators.</td></tr>
+    <tr><td><code>lockHeadingSnapped()</code></td><td>394</td><td>Lock heading snapped to nearest 90° from <code>mazeStartYaw</code>.</td></tr>
+    <tr><td><code>mazeSmoothSpeed()</code></td><td>405</td><td>Trapezoidal speed profile: ramp up → cruise → ramp down.</td></tr>
+    <tr><td><code>isTarget(r, c)</code></td><td>418</td><td>Returns true if cell is one of the center 4 target cells.</td></tr>
+    <tr><td><code>setWallBilateral(r, c, d)</code></td><td>422</td><td>Marks wall from both sides for consistency.</td></tr>
+    <tr><td><code>initMaze()</code></td><td>429</td><td>Clear all maze data; set outer boundary walls.</td></tr>
+    <tr><td><code>floodFill()</code></td><td>443</td><td>BFS from center 4 cells; fills <code>mazeFlood[][]</code> with distances.</td></tr>
+    <tr><td><code>scanMazeWalls()</code></td><td>474</td><td>5-sample majority vote wall detection. Calls <code>setWallBilateral()</code>.</td></tr>
+    <tr><td><code>addToPath()</code></td><td>510</td><td>Appends current cell to the path recording array.</td></tr>
+    <tr><td><code>findBestDirection()</code></td><td>517</td><td>Picks neighbors with lowest flood value. Priority: straight → right → left → back.</td></tr>
+    <tr><td><code>sendHtmlPage()</code></td><td>605</td><td>Sends entire dashboard HTML in chunks to save ESP32 RAM.</td></tr>
+  </table>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     SLIDE 16 — DESIGN DECISIONS & CHALLENGES
+     ████████████████████████████████████████████████████████████ -->
+<div class="slide" id="s16">
+  <span class="slide-num">16 / 16</span>
+  <h2>Design Decisions &amp; Challenges Overcome</h2>
+
+  <div class="card-grid">
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: One Motor After Turn</h3>
+      <p><strong>Cause:</strong> <code>currentYaw = 0</code> was called before pivots, destroying the absolute yaw reference. The snapped heading after the turn was wrong, causing one motor to get max correction.</p>
+      <p><strong>Fix:</strong> Preserve <code>prePivotYaw</code> before turn, measure turn angle as <code>|currentYaw − prePivotYaw|</code>, use differential center-pivot, add pre/post-turn straightening phases.</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: Phantom Walls</h3>
+      <p><strong>Cause:</strong> A single noisy LiDAR reading could falsely mark a wall that doesn't exist.</p>
+      <p><strong>Fix:</strong> 5-sample majority voting — only marks a wall if 3+ out of 5 samples agree. 20 ms delay between samples.</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: Robot Drifts Diagonally</h3>
+      <p><strong>Cause:</strong> Simple weighted fusion of all 3 sensors conflicted — LiDAR said "go right" while gyro said "hold heading".</p>
+      <p><strong>Fix:</strong> Redesigned to cascaded architecture. LiDAR adjusts the <em>target heading</em>, gyro <em>tracks it</em>. Encoder provides backup only.</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: 180° Turns</h3>
+      <p><strong>Cause:</strong> Pivoting 180° in a 20 cm cell is impossible — the robot hits walls.</p>
+      <p><strong>Fix:</strong> Replaced 180° pivot with <code>MAZE_REVERSE</code> — the robot simply drives backward one cell without turning. Direction stays the same, position updates using the opposite direction vector.</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: Gyro Drift</h3>
+      <p><strong>Cause:</strong> After 30+ cells, accumulated gyro drift made the robot miss turns by 5–10°.</p>
+      <p><strong>Fix:</strong> 90° heading snapping at every node and turn. Since the maze is a 90° grid, the correct heading is always a multiple of 90° from the start orientation.</p>
+    </div>
+    <div class="card">
+      <h3 style="color:var(--accent2)">Problem: Blocking Delays</h3>
+      <p><strong>Cause:</strong> <code>delay()</code> calls in the state machine froze the entire ESP32 — WiFi dashboard stopped responding, sensor readings were missed.</p>
+      <p><strong>Fix:</strong> All timing uses non-blocking <code>millis()</code> comparisons. Timer-based phases replace every <code>delay()</code>.</p>
+    </div>
+  </div>
+
+  <div style="text-align:center;margin-top:40px">
+    <h2 style="color:var(--green)">Thank You</h2>
+    <p class="subtitle">LUTFI — Autonomous Micromouse Maze Solver</p>
+    <p style="color:var(--dim)">Questions?</p>
+  </div>
+</div>
+
+<!-- ████████████████████████████████████████████████████████████
+     JAVASCRIPT — Navigation
+     ████████████████████████████████████████████████████████████ -->
+<script>
+// Speed bar heights
+document.querySelectorAll('[data-h]').forEach(el => {
+  el.style.height = el.dataset.h + 'px';
+});
+
+// Navigation dots
+const slides = document.querySelectorAll('.slide');
+const navDots = document.getElementById('navDots');
+slides.forEach((s, i) => {
+  const dot = document.createElement('div');
+  dot.className = 'nav-dot';
+  dot.title = 'Slide ' + (i + 1);
+  dot.onclick = () => s.scrollIntoView({ behavior: 'smooth' });
+  navDots.appendChild(dot);
+});
+
+// Active dot tracking
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      const idx = [...slides].indexOf(e.target);
+      document.querySelectorAll('.nav-dot').forEach((d, i) => {
+        d.classList.toggle('act', i === idx);
+      });
+    }
+  });
+}, { threshold: 0.5 });
+slides.forEach(s => observer.observe(s));
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  const current = [...document.querySelectorAll('.nav-dot.act')];
+  const idx = current.length ? [...document.querySelectorAll('.nav-dot')].indexOf(current[0]) : 0;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === ' ') {
+    e.preventDefault();
+    if (idx < slides.length - 1) slides[idx + 1].scrollIntoView({ behavior: 'smooth' });
+  } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+    e.preventDefault();
+    if (idx > 0) slides[idx - 1].scrollIntoView({ behavior: 'smooth' });
+  }
+});
+</script>
+</body>
+</html>
